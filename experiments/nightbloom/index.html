@@ -60,11 +60,23 @@ function hexA(hex, a) {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
-globalThis.__logic = { moonPhase, hexA, clamp, ease, pop };
+const SCALE = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24]; // A minor pentatonic, semitones from A3
+const freq = semis => 220 * Math.pow(2, semis / 12);
+
+const PALETTES = [
+  { name: 'ember',    petals: ['#ffb347', '#ff7e5f', '#ffd97a'], heart: '#fff3c4' },
+  { name: 'orchid',   petals: ['#e96bff', '#b04cff', '#ff9de2'], heart: '#ffe0f7' },
+  { name: 'lagoon',   petals: ['#39e6c8', '#3fd0ff', '#8af5e2'], heart: '#e0fffa' },
+  { name: 'frost',    petals: ['#9db8ff', '#cfe0ff', '#7e9bff'], heart: '#ffffff' },
+  { name: 'sunfall',  petals: ['#ffd23f', '#ff9a3d', '#ffe98a'], heart: '#fffbe0' },
+  { name: 'spirit',   petals: ['#b8ffd9', '#7df0b8', '#e4ffe9'], heart: '#f4fff6' },
+];
+
+globalThis.__logic = { moonPhase, hexA, clamp, ease, pop, freq, SCALE, PALETTES };
 </script>
 <script>
 'use strict';
-const { moonPhase, hexA, clamp, ease, pop } = globalThis.__logic;
+const { moonPhase, hexA, clamp, ease, pop, freq, SCALE, PALETTES } = globalThis.__logic;
 
 // ---------- tiny utils ----------
 const TAU = Math.PI * 2;
@@ -153,16 +165,6 @@ function swayX(baseY, y, t, phase) {
   return Math.sin(t * 0.7 + phase + h * 0.012) * h * 0.045
        + Math.sin(t * 1.9 + phase * 2) * h * 0.008;
 }
-
-// ---------- palettes ----------
-const PALETTES = [
-  { name: 'ember',    petals: ['#ffb347', '#ff7e5f', '#ffd97a'], heart: '#fff3c4' },
-  { name: 'orchid',   petals: ['#e96bff', '#b04cff', '#ff9de2'], heart: '#ffe0f7' },
-  { name: 'lagoon',   petals: ['#39e6c8', '#3fd0ff', '#8af5e2'], heart: '#e0fffa' },
-  { name: 'frost',    petals: ['#9db8ff', '#cfe0ff', '#7e9bff'], heart: '#ffffff' },
-  { name: 'sunfall',  petals: ['#ffd23f', '#ff9a3d', '#ffe98a'], heart: '#fffbe0' },
-  { name: 'spirit',   petals: ['#b8ffd9', '#7df0b8', '#e4ffe9'], heart: '#f4fff6' },
-];
 
 // ---------- plants ----------
 const plants = [];
@@ -414,8 +416,6 @@ function drawFireflies(t, dt) {
 
 // ---------- audio ----------
 let AC = null, bus = null, muted = false;
-const SCALE = [0, 3, 5, 7, 10, 12, 15, 17, 19, 22, 24]; // A minor pentatonic, semitones from A3
-const freq = semis => 220 * Math.pow(2, semis / 12);
 
 function audioInit() {
   if (AC) return;
