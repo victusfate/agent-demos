@@ -128,3 +128,31 @@ test('step: returns a fresh Uint8Array of 0/1 and leaves the input intact', () =
   assert.deepEqual(g, before, 'input grid must not be mutated');
   for (const v of next) assert.ok(v === 0 || v === 1);
 });
+
+// ---------- slice 3 — age tick ----------
+
+test('ageTick: born -> 1, surviving -> +1, dead -> 0', () => {
+  const { ageTick } = loadLogic(HTML);
+  //            born  survive  die   stay-dead
+  const before = Uint8Array.from([0, 1, 1, 0]);
+  const after  = Uint8Array.from([1, 1, 0, 0]);
+  const ages   = Uint16Array.from([0, 7, 3, 0]);
+  const next = ageTick(ages, before, after);
+  assert.equal(next[0], 1, 'born cell starts at age 1');
+  assert.equal(next[1], 8, 'survivor increments');
+  assert.equal(next[2], 0, 'dead cell resets to 0');
+  assert.equal(next[3], 0, 'empty cell stays 0');
+});
+
+test('ageTick: pure — does not mutate its inputs', () => {
+  const { ageTick } = loadLogic(HTML);
+  const before = Uint8Array.from([0, 1]);
+  const after  = Uint8Array.from([1, 1]);
+  const ages   = Uint16Array.from([0, 4]);
+  const snapAges = Uint16Array.from(ages);
+  const next = ageTick(ages, before, after);
+  assert.notEqual(next, ages);
+  assert.deepEqual(ages, snapAges, 'ages input must not be mutated');
+  assert.deepEqual(before, Uint8Array.from([0, 1]));
+  assert.deepEqual(after, Uint8Array.from([1, 1]));
+});
