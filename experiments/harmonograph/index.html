@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>harmonograph — a singing drawing machine</title>
+</head>
+<body>
+
+<script id="logic">
+'use strict';
+// Pure, DOM-free pendulum math — extracted and unit-tested in Node via
+// experiments/_harness/logic.mjs (see docs/harmonograph/plan.md).
+// IIFE so only __logic reaches the shared global scope.
+(() => {
+
+const TAU = Math.PI * 2;
+
+// Named rational frequency ratios between the two main pendulums.
+// drift is a deliberately detuned fifth: its q runs at q + detune.
+const RATIOS = [
+  { name: 'unison', p: 1, q: 1 },
+  { name: 'octave', p: 1, q: 2 },
+  { name: 'fifth',  p: 2, q: 3 },
+  { name: 'fourth', p: 3, q: 4 },
+  { name: 'sixth',  p: 3, q: 5 },
+  { name: 'drift',  p: 2, q: 3, detune: 0.01 },
+];
+
+const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+
+// Convention (documented in docs/harmonograph/prd.md): with unit base
+// frequency the pendulum angular frequencies are the integers p and q, so
+// the undamped figure closes after 2π / gcd(p, q). For the 1:2 octave this
+// is 2π — the longer (slower) pendulum's full cycle.
+const period = ({ p, q }) => TAU / gcd(p, q);
+
+globalThis.__logic = { RATIOS, gcd, period };
+})();
+</script>
+<script>
+'use strict';
+// App shell — built out in slice 5.
+</script>
+</body>
+</html>
