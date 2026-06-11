@@ -7,18 +7,21 @@
 # dropped onto the experiment page. Source videos can be feature-length, so
 # by default only a 3-minute sample is downloaded.
 #
-# Usage:   bash scripts/fetch-test-video.sh [--hq] <url> [start] [duration|full]
+# Usage:   bash scripts/fetch-test-video.sh [--hq] [--res <height>] <url> [start] [duration|full]
 #   bash scripts/fetch-test-video.sh <url>              # first 3 minutes
 #   bash scripts/fetch-test-video.sh <url> 45:00        # 3 min from 45:00
 #   bash scripts/fetch-test-video.sh <url> 45:00 5:00   # 5 min from 45:00
 #   bash scripts/fetch-test-video.sh <url> full         # entire video
 #   bash scripts/fetch-test-video.sh --hq <url> full    # highest quality, whole video
+#   bash scripts/fetch-test-video.sh --res 2160 <url>   # best ≤2160p, highest fps
 #
 # --hq merges the best separate video+audio streams (4K/8K where offered)
 # instead of the best single-file mp4 (~720p on YouTube). Above 1080p
 # YouTube serves VP9/AV1, so the result is usually .webm/.mkv — fine for
-# Chrome/Edge. Note: without a JS runtime (deno) yt-dlp may not see the
-# very top formats.
+# Chrome/Edge. Seeing the full format ladder requires a JS runtime (deno
+# or node) plus yt-dlp's remotely-fetched EJS solver, which is opt-in;
+# this script passes --remote-components ejs:github to enable it (cached
+# locally after the first run).
 #
 # Requires yt-dlp (pip install yt-dlp | brew install yt-dlp); sampling and
 # --hq also require ffmpeg (section cutting / stream muxing).
@@ -31,13 +34,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT/videos"
 
 HQ=0
-if [[ "${1:-}" == "--hq" ]]; then
-  HQ=1
-  shift
-fi
+RES=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --hq) HQ=1; shift ;;
+    --res) RES="${2:-0}"; HQ=1; shift 2 ;;  # a height cap implies stream merging
+    *) echo "error: unknown option $1" >&2; exit 2 ;;
+  esac
+done
 
 if [[ $# -lt 1 || $# -gt 3 ]]; then
-  echo "usage: bash scripts/fetch-test-video.sh [--hq] <url> [start] [duration|full]" >&2
+  echo "usage: bash scripts/fetch-test-video.sh [--hq] [--res <height>] <url> [start] [duration|full]" >&2
   exit 2
 fi
 URL="$1"
@@ -60,6 +67,12 @@ if [[ $HQ -eq 1 ]]; then
   FMT='bv*+ba/b'
 fi
 
+# Height cap: best stream at or below RES, preferring higher frame rates.
+SORT=()
+if [[ "$RES" -gt 0 ]]; then
+  SORT=(-S "res:${RES},fps")
+fi
+
 # "1:23:45" / "23:45" / "45" -> seconds
 to_seconds() {
   awk -F: '{ s = 0; for (i = 1; i <= NF; i++) s = s * 60 + $i; print s }' <<<"$1"
@@ -74,7 +87,7 @@ if [[ "$START" != "full" ]]; then
   START_S="$(to_seconds "$START")"
   END_S="$(( START_S + $(to_seconds "$DURATION") ))"
   EXTRA_ARGS+=(--download-sections "*${START_S}-${END_S}" --force-keyframes-at-cuts
-               -o "$OUT_DIR/%(title)s [${START_S}s-${END_S}s].%(ext)s")
+               -o "$OUT_DIR/%(title)s_${START_S}s-${END_S}s.%(ext)s")
 else
   EXTRA_ARGS+=(-o "$OUT_DIR/%(title)s.%(ext)s")
 fi
@@ -83,7 +96,10 @@ mkdir -p "$OUT_DIR"
 
 yt-dlp \
   --no-playlist \
+  --restrict-filenames \
+  --remote-components ejs:github \
   -f "$FMT" \
+  "${SORT[@]}" \
   --print after_move:filepath \
   --no-simulate \
   "${EXTRA_ARGS[@]}" \
