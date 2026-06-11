@@ -51,19 +51,25 @@ function moonPhase(date) {
   return ((days % synodic) + synodic) % synodic / synodic; // 0 new, .5 full
 }
 
-globalThis.__logic = { moonPhase };
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const ease = t => 1 - Math.pow(1 - t, 3);                       // easeOutCubic
+const pop  = t => { const c = 1.70158; t -= 1; return 1 + (c + 1) * t * t * t + c * t * t; }; // easeOutBack
+
+function hexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+globalThis.__logic = { moonPhase, hexA, clamp, ease, pop };
 </script>
 <script>
 'use strict';
-const { moonPhase } = globalThis.__logic;
+const { moonPhase, hexA, clamp, ease, pop } = globalThis.__logic;
 
 // ---------- tiny utils ----------
 const TAU = Math.PI * 2;
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = arr => arr[(Math.random() * arr.length) | 0];
-const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const ease = t => 1 - Math.pow(1 - t, 3);                       // easeOutCubic
-const pop  = t => { const c = 1.70158; t -= 1; return 1 + (c + 1) * t * t * t + c * t * t; }; // easeOutBack
 
 // ---------- canvas ----------
 const canvas = document.getElementById('c');
@@ -310,11 +316,6 @@ function drawPlant(plant, t) {
   }
   ctx.restore();
   return true;
-}
-
-function hexA(hex, a) {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
 
 // ---------- sparkles & shooting stars ----------
