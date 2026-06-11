@@ -145,6 +145,78 @@ test('stepBodies: culls escapees beyond opts.cullRadius, never the sun', () => {
   assert.ok(Math.abs(Math.hypot(bodies[1].x, bodies[1].y) - 200) < 5, 'orbiter kept');
 });
 
+// ---------- slice 3 — winding and notes ----------
+
+const PENTA = [0, 3, 5, 7, 10, 12, 15];
+
+test('orbitCount: a full counter-clockwise revolution counts exactly once', () => {
+  const { orbitCount } = loadLogic(HTML);
+  let count = 0, crossings = 0;
+  const steps = 100;
+  for (let i = 1; i <= steps; i++) {
+    const prev = ((i - 1) / steps) * TAU;
+    const next = (i / steps) * TAU;
+    const before = Math.floor(count);
+    count = orbitCount(Math.atan2(Math.sin(prev), Math.cos(prev)),
+                       Math.atan2(Math.sin(next), Math.cos(next)), count);
+    if (Math.floor(count) > before) crossings++;
+  }
+  assert.ok(Math.abs(count - 1) < 1e-9, `one revolution should give count ~1, got ${count}`);
+  assert.equal(crossings, 1, 'the orbit completes exactly once');
+});
+
+test('orbitCount: wraps cleanly across the ±π seam', () => {
+  const { orbitCount } = loadLogic(HTML);
+  const count = orbitCount(Math.PI - 0.1, -Math.PI + 0.1, 0);
+  assert.ok(Math.abs(count - 0.2 / TAU) < 1e-9,
+    `seam crossing should add +0.2 rad of winding, got ${count * TAU} rad`);
+});
+
+test('orbitCount: clockwise motion winds negative', () => {
+  const { orbitCount } = loadLogic(HTML);
+  let count = 0;
+  const steps = 100;
+  for (let i = 1; i <= steps; i++) {
+    const prev = -((i - 1) / steps) * TAU;
+    const next = -(i / steps) * TAU;
+    count = orbitCount(Math.atan2(Math.sin(prev), Math.cos(prev)),
+                       Math.atan2(Math.sin(next), Math.cos(next)), count);
+  }
+  assert.ok(Math.abs(count + 1) < 1e-9, `clockwise revolution should give ~-1, got ${count}`);
+});
+
+test('orbitCount: a back-and-forth wiggle accumulates nothing', () => {
+  const { orbitCount } = loadLogic(HTML);
+  let count = 0;
+  count = orbitCount(0.0, 0.3, count);
+  count = orbitCount(0.3, 0.0, count);
+  assert.ok(Math.abs(count) < 1e-12);
+});
+
+test('noteForMass: heavier mass never gets a higher note (monotonic)', () => {
+  const { noteForMass } = loadLogic(HTML);
+  let prev = Infinity;
+  for (const m of [0.5, 1, 2, 5, 10, 30, 100, 400, 1500, 6000, 50000]) {
+    const n = noteForMass(m, PENTA);
+    assert.ok(n <= prev, `mass ${m}: note ${n} rose above ${prev}`);
+    prev = n;
+  }
+});
+
+test('noteForMass: always returns a degree of the given scale', () => {
+  const { noteForMass } = loadLogic(HTML);
+  for (const m of [1e-3, 1, 7, 42, 999, 1e7]) {
+    assert.ok(PENTA.includes(noteForMass(m, PENTA)), `mass ${m} left the scale`);
+  }
+});
+
+test('noteForMass: spans the scale — light masses sing high, heavy masses low', () => {
+  const { noteForMass } = loadLogic(HTML);
+  const notes = new Set([1, 10, 100, 1000, 10000].map(m => noteForMass(m, PENTA)));
+  assert.ok(notes.size >= 3, `expected >=3 distinct notes across the mass range, got ${notes.size}`);
+  assert.ok(noteForMass(1, PENTA) > noteForMass(10000, PENTA), 'light must sit above heavy');
+});
+
 test('stepBodies: circular-orbit speed sqrt(G*M/r) holds radius within ±5% over 3 orbits', () => {
   const { stepBodies } = loadLogic(HTML);
   const G = 1, M = 1e6, r = 200;
