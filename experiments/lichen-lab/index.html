@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lichen-lab</title>
+</head>
+<body>
+<script id="logic">
+'use strict';
+// Pure, DOM-free simulation logic — unit-tested in Node via
+// experiments/_harness/logic.mjs. IIFE so only __logic reaches the
+// shared global scope.
+(() => {
+
+globalThis.__logic = {};
+})();
+</script>
+</body>
+</html>
