@@ -29,7 +29,38 @@ const PRESETS = [
   { name: 'Coral',       rule: 'B3/S45678',    temperament: 'accretive' },
 ];
 
-globalThis.__logic = { parseRule, PRESETS };
+// Toroidal Moore-neighborhood count for one cell.
+function countNeighbors(grid, w, h, x, y) {
+  const xl = (x + w - 1) % w, xr = (x + 1) % w;
+  const yu = (y + h - 1) % h, yd = (y + 1) % h;
+  const ru = yu * w, rm = y * w, rd = yd * w;
+  return grid[ru + xl] + grid[ru + x] + grid[ru + xr]
+       + grid[rm + xl] +                grid[rm + xr]
+       + grid[rd + xl] + grid[rd + x] + grid[rd + xr];
+}
+
+// One generation on a toroidal grid of 0/1 cells. Returns a fresh
+// Uint8Array; never mutates the input. Kept allocation-free per cell so
+// 160x100 at 60 gen/s stays cheap.
+function step(grid, w, h, rule) {
+  const next = new Uint8Array(w * h);
+  const { birth, survive } = rule;
+  for (let y = 0; y < h; y++) {
+    const yu = ((y + h - 1) % h) * w;
+    const ym = y * w;
+    const yd = ((y + 1) % h) * w;
+    for (let x = 0; x < w; x++) {
+      const xl = (x + w - 1) % w, xr = (x + 1) % w;
+      const n = grid[yu + xl] + grid[yu + x] + grid[yu + xr]
+              + grid[ym + xl] +               grid[ym + xr]
+              + grid[yd + xl] + grid[yd + x] + grid[yd + xr];
+      next[ym + x] = grid[ym + x] ? (survive.has(n) ? 1 : 0) : (birth.has(n) ? 1 : 0);
+    }
+  }
+  return next;
+}
+
+globalThis.__logic = { parseRule, countNeighbors, step, PRESETS };
 })();
 </script>
 </body>
