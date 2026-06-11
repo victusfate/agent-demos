@@ -211,3 +211,126 @@ test('structure: HUD has BPM readout, sensitivity slider, six chips, file input'
   assert.equal((html.match(/class="chip"/g) ?? []).length, 6, 'six effect chips');
   assert.match(html, /type="file"[^>]*accept="video\/\*"/, 'video file input');
 });
+
+// ════════════════════ fx-pack ════════════════════
+// docs/beat-prism-fx-pack — registry, beat grid, conductor, parameter math.
+
+// ---------- fx slice 1 — registry + parameter math ----------
+
+const NEW_IDS = {
+  color: ['hue-spin', 'posterize', 'invert-strobe', 'duotone', 'sat-pump',
+          'bleach-burn', 'thermal', 'channel-swap', 'neon-edge',
+          'gamma-flicker', 'color-drain', 'sepia-ghost'],
+  geometry: ['rotate-jolt', 'kaleidoscope', 'mirror-flip', 'tile-grid',
+             'pixelate', 'slice-glitch', 'v-slice', 'squash', 'skew-tilt',
+             'spin-zoom'],
+  temporal: ['echo-trails', 'motion-ghost', 'strobe-black', 'freeze-frame',
+             'stutter-loop', 'time-smear', 'droste', 'interlace-roll'],
+  overlay: ['scanlines', 'vhs-band', 'grain-burst', 'vignette-pump',
+            'letterbox-snap', 'starburst', 'shockwave'],
+  scene: ['lightning', 'confetti', 'glyph-pop'],
+};
+const ORIGINAL_CAT = {
+  zoom: 'geometry', flash: 'color', shake: 'geometry',
+  burst: 'scene', chroma: 'color', glow: 'overlay',
+};
+
+test('registry: 46 entries with unique ids', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  assert.equal(FX_REGISTRY.length, 46);
+  assert.equal(new Set(FX_REGISTRY.map(e => e.id)).size, 46);
+});
+
+test('registry: canonical ids — all 40 new effects and the original six', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  const ids = new Set(FX_REGISTRY.map(e => e.id));
+  for (const cat of Object.keys(NEW_IDS)) {
+    for (const id of NEW_IDS[cat]) assert.ok(ids.has(id), `missing ${id}`);
+  }
+  for (const id of Object.keys(ORIGINAL_CAT)) assert.ok(ids.has(id), `missing ${id}`);
+});
+
+test('registry: exact category counts (new 12/10/8/7/3, originals mapped)', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  const byId = new Map(FX_REGISTRY.map(e => [e.id, e]));
+  for (const [cat, ids] of Object.entries(NEW_IDS)) {
+    for (const id of ids) assert.equal(byId.get(id)?.cat, cat, `${id} → ${cat}`);
+  }
+  for (const [id, cat] of Object.entries(ORIGINAL_CAT)) {
+    assert.equal(byId.get(id)?.cat, cat, `${id} → ${cat}`);
+  }
+  const count = cat => FX_REGISTRY.filter(e => e.cat === cat).length;
+  assert.equal(count('color'), 14);
+  assert.equal(count('geometry'), 12);
+  assert.equal(count('temporal'), 8);
+  assert.equal(count('overlay'), 8);
+  assert.equal(count('scene'), 4);
+});
+
+test('registry: every entry has a name, a valid kind, and a boolean heavy flag', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  for (const e of FX_REGISTRY) {
+    assert.equal(typeof e.name, 'string', `${e.id} name`);
+    assert.ok(e.name.length > 0, `${e.id} name non-empty`);
+    assert.ok(['pulse', 'continuous', 'scheduled'].includes(e.kind), `${e.id} kind ${e.kind}`);
+    assert.equal(typeof e.heavy, 'boolean', `${e.id} heavy`);
+  }
+});
+
+test('mulberry32: deterministic per seed, in [0,1), seeds diverge', () => {
+  const { mulberry32 } = loadLogic(HTML);
+  const a = mulberry32(42), b = mulberry32(42), c = mulberry32(43);
+  const seqA = Array.from({ length: 8 }, () => a());
+  const seqB = Array.from({ length: 8 }, () => b());
+  const seqC = Array.from({ length: 8 }, () => c());
+  assert.deepEqual(seqA, seqB, 'same seed, same sequence');
+  assert.notDeepEqual(seqA, seqC, 'different seed, different sequence');
+  for (const v of seqA) assert.ok(v >= 0 && v < 1, `out of range: ${v}`);
+});
+
+test('latencyMs: FFT window center plus one rAF', () => {
+  const { latencyMs } = loadLogic(HTML);
+  // 1024/44100 s ≈ 23.22 ms, + 16 ms ≈ 39.22 ms
+  assert.ok(Math.abs(latencyMs(2048, 44100) - 39.22) < 0.1, `${latencyMs(2048, 44100)}`);
+  assert.ok(Math.abs(latencyMs(2048, 48000) - 37.33) < 0.1, `${latencyMs(2048, 48000)}`);
+});
+
+test('sliceOffsets: deterministic, right length, bounded, not flat', () => {
+  const { sliceOffsets } = loadLogic(HTML);
+  const a = sliceOffsets(7, 12, 40);
+  assert.deepEqual(a, sliceOffsets(7, 12, 40), 'deterministic per seed');
+  assert.notDeepEqual(a, sliceOffsets(8, 12, 40), 'seed changes offsets');
+  assert.equal(a.length, 12);
+  for (const v of a) assert.ok(Math.abs(v) <= 40, `|${v}| ≤ 40`);
+  assert.ok(new Set(a).size > 1, 'offsets vary');
+});
+
+test('wedgeAngles: n evenly spaced wedge starts from 0', () => {
+  const { wedgeAngles } = loadLogic(HTML);
+  const w = wedgeAngles(6);
+  assert.equal(w.length, 6);
+  assert.equal(w[0], 0);
+  const step = Math.PI * 2 / 6;
+  for (let i = 1; i < 6; i++) {
+    assert.ok(Math.abs(w[i] - i * step) < 1e-12, `wedge ${i}`);
+  }
+});
+
+test('posterizeCurve: quantizes into levels, clamps input', () => {
+  const { posterizeCurve } = loadLogic(HTML);
+  assert.equal(posterizeCurve(0, 4), 0);
+  assert.equal(posterizeCurve(1, 4), 1);
+  assert.equal(posterizeCurve(0.4, 2), 0);
+  assert.equal(posterizeCurve(0.6, 2), 1);
+  assert.ok(Math.abs(posterizeCurve(0.5, 3) - 0.5) < 1e-12, 'mid level of 3');
+  assert.equal(posterizeCurve(1.5, 4), 1, 'clamps high');
+  assert.equal(posterizeCurve(-0.5, 4), 0, 'clamps low');
+});
+
+test('ringIndex: wraps backward through a 12-slot ring', () => {
+  const { ringIndex } = loadLogic(HTML);
+  assert.equal(ringIndex(5, 0, 12), 5);
+  assert.equal(ringIndex(0, 1, 12), 11);
+  assert.equal(ringIndex(3, 15, 12), 0);   // wraps a full lap and a bit
+  assert.equal(ringIndex(7, 3, 12), 4);
+});
