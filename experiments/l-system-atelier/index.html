@@ -14,7 +14,19 @@
 // IIFE so only __logic reaches the shared global scope.
 (() => {
 
-globalThis.__logic = {};
+// expand: n parallel derivations. Every pass rewrites all symbols at once;
+// symbols without a rule copy through unchanged.
+function expand(axiom, rules, n) {
+  let s = axiom;
+  for (let i = 0; i < n; i++) {
+    let out = '';
+    for (const ch of s) out += rules[ch] ?? ch;
+    s = out;
+  }
+  return s;
+}
+
+globalThis.__logic = { expand };
 })();
 </script>
 </body>
