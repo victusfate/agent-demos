@@ -4,8 +4,62 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>ascii-drift — a world of text</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #04070b; }
+  canvas { display: block; }
+  /* phosphor scanlines + vignette */
+  #crt {
+    position: fixed; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(ellipse at 50% 42%, rgba(140,190,255,0.045) 0%, transparent 58%),
+      repeating-linear-gradient(0deg, rgba(0,0,0,0.16) 0px, rgba(0,0,0,0.16) 1px, transparent 1px, transparent 3px),
+      radial-gradient(ellipse at center, transparent 52%, rgba(0,0,5,0.62) 100%);
+  }
+  #title {
+    position: fixed; inset: 0; pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-family: Georgia, 'Times New Roman', serif; color: #cfe0ff; text-align: center;
+    text-shadow: 0 0 22px rgba(110,170,255,0.55); transition: opacity 2.4s ease;
+  }
+  #title h1 { font-size: 2.7rem; font-weight: normal; letter-spacing: .42em; margin: 0 0 .7rem; opacity: .92; }
+  #title p  { font-size: .95rem; letter-spacing: .14em; opacity: .6; margin: .2rem 0; }
+  #title.hidden { opacity: 0; }
+  #region {
+    position: fixed; left: 26px; bottom: 22px; pointer-events: none;
+    font-family: Georgia, 'Times New Roman', serif; color: #dce8ff;
+    text-shadow: 0 0 16px rgba(120,180,255,0.55), 0 0 40px rgba(120,180,255,0.25);
+    opacity: 0; transition: opacity 1.4s ease;
+  }
+  #region .name { font-size: 1.7rem; letter-spacing: .08em; font-style: italic; }
+  #region .sub  {
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-style: normal;
+    font-size: .68rem; letter-spacing: .22em; color: rgba(160,190,235,0.55);
+    margin-top: .35rem; text-transform: uppercase;
+  }
+  #hint {
+    position: fixed; right: 20px; bottom: 16px; pointer-events: none;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .68rem;
+    letter-spacing: .12em; color: rgba(150,180,230,0.4);
+  }
+  #toast {
+    position: fixed; top: 24px; left: 50%; transform: translateX(-50%); pointer-events: none;
+    font-family: Georgia, serif; font-size: .9rem; letter-spacing: .18em; color: rgba(205,225,255,0.85);
+    text-shadow: 0 0 14px rgba(120,170,255,0.6); opacity: 0; transition: opacity .6s ease;
+  }
+</style>
 </head>
 <body>
+<canvas id="c"></canvas>
+<div id="crt"></div>
+<div id="title">
+  <h1>ascii-drift</h1>
+  <p>an endless landscape, made entirely of text</p>
+  <p>arrows steer &middot; shift hurries &middot; + / &minus; zoom &middot; r reseed</p>
+</div>
+<div id="region"><div class="name"></div><div class="sub"></div></div>
+<div id="hint">[&larr;&uarr;&darr;&rarr;/wasd] steer &nbsp; [shift] hurry &nbsp; [+/-] zoom &nbsp; [r] reseed &nbsp; [p] pause</div>
+<div id="toast"></div>
+
 <script id="logic">
 'use strict';
 // Pure, DOM-free world math — extracted and unit-tested in Node via
@@ -106,6 +160,15 @@ function charFor(biome, h) {
   return chars[Math.min(chars.length - 1, Math.floor(f * chars.length))];
 }
 
+// sea sparkle: ~/≈ alternation driven by world coords + time — animated,
+// yet fully deterministic for a given (x, y, t).
+function sparkleChar(x, y, t) {
+  const v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  const phase = v - Math.floor(v);
+  const cycle = (((t * 0.9 + phase * 2) % 2) + 2) % 2;
+  return cycle < 1.45 ? '~' : '≈';
+}
+
 // ---------- region names ----------
 // Syllable grammar: onset + vowel per syllable, a single coda only on the
 // final syllable — so no word ever contains a 3+ consonant run.
@@ -120,6 +183,7 @@ function nameWord(rng) {
     w += ONSETS[Math.floor(rng() * ONSETS.length)] + VOWELS[Math.floor(rng() * VOWELS.length)];
   }
   w += CODAS[Math.floor(rng() * CODAS.length)];
+  if (w.length < 2) w += CODAS[2 + Math.floor(rng() * (CODAS.length - 2))]; // no one-letter names
   return w.charAt(0).toUpperCase() + w.slice(1);
 }
 
@@ -133,8 +197,249 @@ function regionName(bx, by, dominantBiome, seed = 0) {
   return `${article}${nameWord(rng)} ${suffix}`;
 }
 
-globalThis.__logic = { mulberry, makeNoise, fbm, BIOMES, biomeFor, charFor, regionName };
+globalThis.__logic = { mulberry, makeNoise, fbm, BIOMES, biomeFor, charFor, sparkleChar, regionName };
 })();
+</script>
+<script>
+'use strict';
+const { mulberry, makeNoise, fbm, BIOMES, biomeFor, charFor, sparkleChar, regionName } = globalThis.__logic;
+
+// ---------- canvas ----------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 0, H = 0, DPR = 1;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  baseFont = Math.max(9, Math.min(22, W / (110 * 0.602))); // ~110 cols at mid zoom
+  fontPx = -1; // force font re-measure
+}
+window.addEventListener('resize', resize);
+
+// ---------- world ----------
+const BLOCK = 48;            // world cells per naming block
+const HFREQ = 0.014, MFREQ = 0.008, SHAPE = 1.9;
+let seed = 70451, noiseH = null, noiseM = null;
+
+function setSeed(s) {
+  seed = s >>> 0;
+  noiseH = makeNoise(seed);
+  noiseM = makeNoise((seed ^ 0x9E3779B9) >>> 0);
+  lastBlockKey = null; // re-announce region
+}
+const heightAt = (wx, wy) => {
+  const v = (fbm(noiseH, wx * HFREQ, wy * HFREQ, 5) - 0.5) * SHAPE + 0.5;
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+};
+const moistAt = (wx, wy) => fbm(noiseM, wx * MFREQ, wy * MFREQ, 3);
+
+// ---------- camera, drift, zoom ----------
+const cam = { x: -1800.5, y: 1800.5 };          // a coast with all nine biomes in frame
+const DRIFT = { x: Math.SQRT1_2, y: -Math.SQRT1_2 }; // northeast (screen up = north)
+const BASE_SPEED = 5.5;                          // cells/second on screen
+let paused = false;
+let heading = Math.atan2(DRIFT.y, DRIFT.x);
+let zoomTarget = 0, zoomCur = 0;                 // log2 of stride, in [-2, 3]
+let baseFont = 14, fontPx = -1, charW = 8, cellH = 14;
+
+function strideNow() { return Math.pow(2, zoomCur); }
+
+// ---------- input ----------
+const held = new Set();
+const STEER = {
+  arrowup: [0, -1], w: [0, -1], arrowdown: [0, 1], s: [0, 1],
+  arrowleft: [-1, 0], a: [-1, 0], arrowright: [1, 0], d: [1, 0],
+};
+let titled = true;
+function dismissTitle() {
+  if (!titled) return;
+  titled = false;
+  document.getElementById('title').classList.add('hidden');
+}
+setTimeout(dismissTitle, 7000);
+
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k in STEER) { held.add(k); dismissTitle(); e.preventDefault(); }
+  else if (e.key === '+' || e.key === '=') { zoomTarget = Math.max(-2, zoomTarget - 1); dismissTitle(); }
+  else if (e.key === '-' || e.key === '_') { zoomTarget = Math.min(3, zoomTarget + 1); dismissTitle(); }
+  else if (k === 'r') { setSeed((Math.random() * 4294967296) >>> 0); toast('a new world'); dismissTitle(); }
+  else if (k === 'p') { paused = !paused; toast(paused ? 'drift paused' : 'drifting'); }
+  if (e.key === 'Shift') held.add('shift');
+});
+window.addEventListener('keyup', e => {
+  held.delete(e.key.toLowerCase());
+  if (e.key === 'Shift') held.delete('shift');
+});
+window.addEventListener('blur', () => held.clear());
+
+// ---------- toast ----------
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.style.opacity = 0, 1600);
+}
+
+// ---------- region naming ----------
+const regionEl = document.getElementById('region');
+const regionNameEl = regionEl.querySelector('.name');
+const regionSubEl = regionEl.querySelector('.sub');
+let lastBlockKey = null, regionTimer = null, currentRegion = '';
+
+function dominantBiome(bx, by) {
+  const counts = {};
+  let best = 'plains', bestN = 0;
+  for (let j = 0; j < 4; j++) {
+    for (let i = 0; i < 4; i++) {
+      const wx = (bx + (i + 0.5) / 4) * BLOCK, wy = (by + (j + 0.5) / 4) * BLOCK;
+      const id = biomeFor(heightAt(wx, wy), moistAt(wx, wy));
+      const n = (counts[id] = (counts[id] || 0) + 1);
+      if (n > bestN) { bestN = n; best = id; }
+    }
+  }
+  return best;
+}
+
+function announceRegion(bx, by) {
+  const biome = dominantBiome(bx, by);
+  currentRegion = regionName(bx, by, biome, seed);
+  regionEl.style.opacity = 0;
+  clearTimeout(regionTimer);
+  regionTimer = setTimeout(() => {
+    regionNameEl.textContent = currentRegion;
+    regionSubEl.textContent = `${BIOMES[biome].name} · block ${bx},${by}`;
+    regionEl.style.opacity = 1;
+  }, 420);
+}
+
+// ---------- render ----------
+function setFont(px) {
+  if (px === fontPx) return;
+  fontPx = px;
+  ctx.font = `${px}px ui-monospace, Menlo, Consolas, 'Courier New', monospace`;
+  charW = ctx.measureText('M').width;
+  cellH = px * 1.04;
+}
+
+function drawWorld(t) {
+  const stride = strideNow();
+  setFont(baseFont * Math.pow(0.88, zoomCur));
+  const cols = Math.ceil(W / charW) + 1;
+  const rows = Math.ceil(H / cellH) + 1;
+
+  ctx.fillStyle = '#04070b';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textBaseline = 'top';
+
+  const x0 = cam.x - (cols / 2) * stride;
+  const y0 = cam.y - (rows / 2) * stride;
+
+  for (let row = 0; row < rows; row++) {
+    const wy = y0 + row * stride;
+    const sy = row * cellH;
+    let runColor = null, runStr = '', runStart = 0;
+    for (let col = 0; col < cols; col++) {
+      const wx = x0 + col * stride;
+      const h = heightAt(wx, wy);
+      const b = biomeFor(h, moistAt(wx, wy));
+      const ch = b === 'sea' ? sparkleChar(wx, wy, t) : charFor(b, h);
+      const color = BIOMES[b].color;
+      if (color !== runColor) {
+        if (runColor !== null && runStr.trim() !== '') {
+          ctx.fillStyle = runColor;
+          ctx.fillText(runStr, runStart * charW, sy);
+        }
+        runColor = color; runStr = ''; runStart = col;
+      }
+      runStr += ch;
+    }
+    if (runColor !== null && runStr.trim() !== '') {
+      ctx.fillStyle = runColor;
+      ctx.fillText(runStr, runStart * charW, sy);
+    }
+  }
+}
+
+function drawCompass() {
+  const cx = W - 52, cy = 52, r = 26;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(160,195,245,0.35)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (r - 4), cy + Math.sin(a) * (r - 4));
+    ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(200,220,255,0.75)';
+  ctx.font = '10px Georgia, serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('N', cx, cy - r - 8);
+  // needle along current heading (north = up = -y)
+  ctx.strokeStyle = 'rgba(205,228,255,0.85)';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(heading) * r * 0.3, cy - Math.sin(heading) * r * 0.3);
+  ctx.lineTo(cx + Math.cos(heading) * r * 0.72, cy + Math.sin(heading) * r * 0.72);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(225,240,255,0.95)';
+  ctx.beginPath();
+  ctx.arc(cx + Math.cos(heading) * r * 0.72, cy + Math.sin(heading) * r * 0.72, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.textAlign = 'left'; // restore world-text alignment
+}
+
+// ---------- main loop ----------
+let last = 0;
+function frame(ms) {
+  const t = ms / 1000;
+  const dt = Math.min(0.05, t - last || 0.016);
+  last = t;
+
+  // zoom eases toward its target — font size and stride move together
+  zoomCur += (zoomTarget - zoomCur) * Math.min(1, dt * 5);
+  if (Math.abs(zoomTarget - zoomCur) < 0.0005) zoomCur = zoomTarget;
+
+  // steering: held keys override the default northeast drift
+  let dx = 0, dy = 0;
+  for (const k of held) if (STEER[k]) { dx += STEER[k][0]; dy += STEER[k][1]; }
+  if (dx === 0 && dy === 0) { dx = DRIFT.x; dy = DRIFT.y; }
+  const len = Math.hypot(dx, dy);
+  dx /= len; dy /= len;
+  if (!paused) {
+    heading = Math.atan2(dy, dx);
+    const speed = BASE_SPEED * strideNow() * (held.has('shift') ? 5 : 1);
+    cam.x += dx * speed * dt;
+    cam.y += dy * speed * dt;
+  }
+
+  // region: the block under the viewport center
+  const bx = Math.floor(cam.x / BLOCK), by = Math.floor(cam.y / BLOCK);
+  const key = bx + ',' + by;
+  if (key !== lastBlockKey) { lastBlockKey = key; announceRegion(bx, by); }
+
+  drawWorld(t);
+  drawCompass();
+
+  // debug/acceptance handle
+  window.__state = { camX: cam.x, camY: cam.y, stride: strideNow(), fontPx, seed, zoomTarget, paused, region: currentRegion };
+
+  requestAnimationFrame(frame);
+}
+
+resize();
+setSeed(seed);
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
