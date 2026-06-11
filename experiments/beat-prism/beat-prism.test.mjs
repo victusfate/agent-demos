@@ -531,3 +531,62 @@ test('ringIndex: wraps backward through a 12-slot ring', () => {
   assert.equal(ringIndex(3, 15, 12), 0);   // wraps a full lap and a bit
   assert.equal(ringIndex(7, 3, 12), 4);
 });
+
+// ---------- fx slice 5 — app integration (structural) ----------
+
+const appScript = () => {
+  const html = readFileSync(HTML, 'utf8');
+  // the app script is the <script> block without the id="logic" attribute
+  const blocks = [...html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+    .filter(m => !(m[1] ?? '').includes('id="logic"'));
+  assert.equal(blocks.length, 1, 'exactly one app script block');
+  return blocks[0][2];
+};
+
+test('structure: logic block exports the fx-pack surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['stepGrid', 'gridEvents', 'dealHand', 'mulberry32',
+                    'latencyMs', 'sliceOffsets', 'wedgeAngles',
+                    'posterizeCurve', 'ringIndex']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(Array.isArray(logic.FX_REGISTRY), 'FX_REGISTRY is data');
+});
+
+test('structure: both script blocks parse in Node', () => {
+  const html = readFileSync(HTML, 'utf8');
+  const blocks = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
+  assert.equal(blocks.length, 2, 'logic block + app block');
+  for (const [, src] of blocks) assert.doesNotThrow(() => new Function(src));
+});
+
+test('structure: HUD gains drawer, shuffle toggle and beat-locked dot', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="drawer"/, 'effects drawer');
+  assert.match(html, /id="shuffle"[^>]*type="checkbox"/, 'shuffle toggle');
+  assert.match(html, /id="beatdot"/, 'beat dot next to the BPM readout');
+  assert.match(html, /id="drawerbtn"/, 'drawer button');
+});
+
+test('structure: keys r/e/0/9 bound; the 1-6 effect keys are retired', () => {
+  const app = appScript();
+  for (const k of ['r', 'e', '0', '9']) {
+    assert.ok(app.includes(`e.key === '${k}'`), `key ${k} bound`);
+  }
+  assert.ok(!app.includes("e.key >= '1'"), 'numeric effect keys retired');
+});
+
+test('structure: app drives the registry pipeline through the grid', () => {
+  const app = appScript();
+  for (const call of ['FX_REGISTRY', 'stepGrid(', 'gridEvents(',
+                      'dealHand(', 'latencyMs(']) {
+    assert.ok(app.includes(call), `app uses ${call}`);
+  }
+  assert.match(app, /checkbox/, 'drawer rows carry checkboxes');
+});
+
+test('structure: performance caps — 600 particles, 12-frame ring', () => {
+  const app = appScript();
+  assert.match(app, /PARTICLE_CAP\s*=\s*600/);
+  assert.match(app, /RING_SIZE\s*=\s*12/);
+});
