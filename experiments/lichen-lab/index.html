@@ -12,7 +12,24 @@
 // shared global scope.
 (() => {
 
-globalThis.__logic = {};
+// 'B3/S23' -> { birth: Set, survive: Set }. Case-insensitive; S may be
+// empty (Seeds). Throws a clear Error on anything else.
+function parseRule(str) {
+  const m = /^B([0-8]*)\/S([0-8]*)$/i.exec(String(str).trim());
+  if (!m) throw new Error(`malformed rule "${str}" — expected B<digits>/S<digits>, e.g. B3/S23`);
+  return { birth: new Set([...m[1]].map(Number)), survive: new Set([...m[2]].map(Number)) };
+}
+
+const PRESETS = [
+  { name: 'Life',        rule: 'B3/S23',       temperament: 'orderly' },
+  { name: 'HighLife',    rule: 'B36/S23',      temperament: 'mutinous' },
+  { name: 'Seeds',       rule: 'B2/S',         temperament: 'explosive' },
+  { name: 'Day & Night', rule: 'B3678/S34678', temperament: 'tidal' },
+  { name: 'Maze',        rule: 'B3/S12345',    temperament: 'crystalline' },
+  { name: 'Coral',       rule: 'B3/S45678',    temperament: 'accretive' },
+];
+
+globalThis.__logic = { parseRule, PRESETS };
 })();
 </script>
 </body>
