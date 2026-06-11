@@ -43,6 +43,8 @@
 'use strict';
 // Pure, DOM-free math — extracted and unit-tested in Node via
 // experiments/_harness/logic.mjs (see docs/nightbloom/plan.md).
+// IIFE so only __logic reaches the shared global scope.
+(() => {
 
 function moonPhase(date) {
   const synodic = 29.53058867;
@@ -73,6 +75,7 @@ const PALETTES = [
 ];
 
 globalThis.__logic = { moonPhase, hexA, clamp, ease, pop, freq, SCALE, PALETTES };
+})();
 </script>
 <script>
 'use strict';

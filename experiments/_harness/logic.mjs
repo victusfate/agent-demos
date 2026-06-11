@@ -1,9 +1,12 @@
 // Shared test harness for single-file experiments.
 //
 // Convention: each experiment's index.html holds its pure, DOM-free logic in
-//   <script id="logic"> ... globalThis.__logic = { ... }; </script>
-// and the app script consumes those functions. This loader extracts that
-// block and evaluates it in Node so unit tests never need a browser.
+//   <script id="logic"> (() => { ... globalThis.__logic = { ... }; })(); </script>
+// and the app script consumes those functions via globalThis.__logic. The
+// IIFE is required: top-level function declarations would collide with the
+// app script's const destructuring in the browser's shared global scope.
+// This loader extracts the block and evaluates it in Node so unit tests
+// never need a browser.
 
 import { readFileSync } from 'node:fs';
 
