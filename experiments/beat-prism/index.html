@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>beat-prism — drop a video, get a music video</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+</style>
+</head>
+<body>
+
+<script id="logic">
+'use strict';
+// Pure, DOM-free detection math — extracted and unit-tested in Node via
+// experiments/_harness/logic.mjs (see docs/beat-prism/plan.md).
+// IIFE so only __logic reaches the shared global scope.
+(() => {
+
+// Bass-weighted spectral flux: sum of positive per-bin differences between
+// consecutive magnitude spectra; bins below `bassBins` count twice (kick
+// and snare dominate perceived beat).
+function spectralFlux(prev, curr, bassBins) {
+  let sum = 0;
+  for (let i = 0; i < curr.length; i++) {
+    const d = curr[i] - (prev[i] ?? 0);
+    if (d > 0) sum += i < bassBins ? d * 2 : d;
+  }
+  return sum;
+}
+
+// Mean magnitude over bins [lo, hi) — hi exclusive, clamped; empty → 0.
+function bandEnergy(spectrum, lo, hi) {
+  const a = Math.max(0, lo | 0);
+  const b = Math.min(spectrum.length, hi | 0);
+  if (b <= a) return 0;
+  let sum = 0;
+  for (let i = a; i < b; i++) sum += spectrum[i];
+  return sum / (b - a);
+}
+
+globalThis.__logic = { spectralFlux, bandEnergy };
+})();
+</script>
+<script>
+'use strict';
+// App shell lands in slice 5 (see docs/beat-prism/plan.md).
+</script>
+</body>
+</html>
