@@ -188,6 +188,35 @@ test('regionName: world seed changes the names', () => {
   assert.ok(diff > 15, `seeds barely change names (${diff}/20 differ)`);
 });
 
+// ---------- slice 4 — sea sparkle & structural surface ----------
+
+test('sparkleChar: deterministic, always ~ or ≈', () => {
+  const { sparkleChar } = loadLogic(HTML);
+  for (let i = 0; i < 60; i++) {
+    const x = i * 1.7 - 30, y = i * 0.9, t = i * 0.21;
+    const c = sparkleChar(x, y, t);
+    assert.equal(c, sparkleChar(x, y, t), 'not deterministic');
+    assert.ok(c === '~' || c === '≈', `unexpected sparkle char ${JSON.stringify(c)}`);
+  }
+});
+
+test('sparkleChar: animates over time and varies over space', () => {
+  const { sparkleChar } = loadLogic(HTML);
+  const overTime = new Set(), overSpace = new Set();
+  for (let t = 0; t < 6; t += 0.25) overTime.add(sparkleChar(12.5, -3.25, t));
+  for (let i = 0; i < 40; i++) overSpace.add(sparkleChar(i * 1.3, i * 2.7, 1.0));
+  assert.equal(overTime.size, 2, 'a fixed cell must alternate over time');
+  assert.equal(overSpace.size, 2, 'a fixed instant must vary across cells');
+});
+
+test('structure: logic block exports the full documented surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['mulberry', 'makeNoise', 'fbm', 'biomeFor', 'charFor', 'regionName', 'sparkleChar']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(logic.BIOMES && typeof logic.BIOMES === 'object', 'BIOMES must be a table');
+});
+
 test('fbm: smooth — small step changes value by < 0.05', () => {
   const { makeNoise, fbm } = loadLogic(HTML);
   const noise = makeNoise(2026);
