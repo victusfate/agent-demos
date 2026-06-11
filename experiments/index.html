@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the cabinet of curiosities</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: radial-gradient(ellipse at 50% -20%, #131a3a 0%, #0b1030 45%, #020108 100%);
+    font-family: Georgia, 'Times New Roman', serif; color: #cfd8ff;
+    padding: 4rem 1.5rem 5rem;
+  }
+  header { text-align: center; margin-bottom: 3rem; }
+  h1 { font-weight: normal; letter-spacing: .35em; font-size: 2.2rem; margin: 0 0 .8rem;
+       text-shadow: 0 0 24px rgba(120,160,255,.5); }
+  header p { opacity: .6; letter-spacing: .12em; margin: 0; }
+  .grid {
+    display: grid; gap: 1.2rem; max-width: 1100px; margin: 0 auto;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  }
+  a.card {
+    display: block; text-decoration: none; color: inherit;
+    border: 1px solid rgba(140,160,255,.18); border-radius: 14px;
+    padding: 1.3rem 1.4rem; background: rgba(16,22,52,.55);
+    transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  }
+  a.card:hover {
+    transform: translateY(-3px); border-color: rgba(160,185,255,.55);
+    box-shadow: 0 8px 32px rgba(80,110,255,.18);
+  }
+  .card .emoji { font-size: 1.9rem; float: right; margin-left: .6rem;
+                 filter: drop-shadow(0 0 10px rgba(150,180,255,.5)); }
+  .card h2 { font-weight: normal; font-size: 1.15rem; letter-spacing: .18em; margin: 0 0 .45rem; }
+  .card p { font-size: .88rem; line-height: 1.5; opacity: .65; margin: 0; }
+  a.card.missing { opacity: .38; pointer-events: none; }
+  a.card.missing h2::after { content: ' · unmerged'; font-size: .7em; opacity: .8; letter-spacing: .1em; }
+  footer { text-align: center; margin-top: 3.5rem; font-size: .8rem; opacity: .4; letter-spacing: .12em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>the cabinet of curiosities</h1>
+  <p>eleven small worlds, each one HTML file. click to enter.</p>
+</header>
+<div class="grid" id="grid"></div>
+<footer>zero dependencies · zero build · grown in ./experiments</footer>
+
+<script>
+const EXPERIMENTS = [
+  { slug: 'nightbloom',          emoji: '🌙', title: 'nightbloom',          blurb: 'A bioluminescent garden. Plant glowing flowers with a click; the moon shows tonight’s real phase, and every bloom plays a chime.' },
+  { slug: 'pocket-orrery',       emoji: '🪐', title: 'pocket orrery',       blurb: 'Fling planets around a sun. Real gravity, orbit trails, collisions that merge worlds — and each orbit hums its own note.' },
+  { slug: 'euclid-beats',        emoji: '🥁', title: 'euclid beats',        blurb: 'A drum loom. One ancient algorithm — Euclidean rhythm — weaves world-music grooves you can bend while they play.' },
+  { slug: 'ink-drift',           emoji: '🫧', title: 'ink drift',           blurb: 'Drop ink into dark water and steer the currents. Curl-noise fluid painting that never repeats.' },
+  { slug: 'boid-lagoon',         emoji: '🐟', title: 'boid lagoon',         blurb: 'A midnight aquarium that thinks as a flock. Feed the fish, or click to unleash something hungry.' },
+  { slug: 'l-system-atelier',    emoji: '🌿', title: 'l-system atelier',    blurb: 'Grammar in, garden out. Edit three rewrite rules and watch alien botany grow before your eyes.' },
+  { slug: 'minotaur-maze',       emoji: '🏛️', title: 'minotaur maze',       blurb: 'A labyrinth builds itself, then a thread of Ariadne solves it through the fog. You can race it.' },
+  { slug: 'lichen-lab',          emoji: '🧫', title: 'lichen lab',          blurb: 'Paint living cells and rewrite the rules of Life. B/S notation, gorgeous decay trails, instant mutation.' },
+  { slug: 'constellation-forge', emoji: '✨', title: 'constellation forge', blurb: 'Connect the stars however you like — the forge names your constellation and writes its myth.' },
+  { slug: 'harmonograph',        emoji: '🖋️', title: 'harmonograph',        blurb: 'Two damped pendulums and a pen: the Victorian machine that draws math. Tune it, let it sing.' },
+  { slug: 'ascii-drift',         emoji: '🗺️', title: 'ascii drift',         blurb: 'An infinite landscape made entirely of text, scrolling forever. Mountains, forests, seas — all characters.' },
+];
+
+const grid = document.getElementById('grid');
+for (const e of EXPERIMENTS) {
+  const a = document.createElement('a');
+  a.className = 'card';
+  a.href = `./${e.slug}/index.html`;
+  a.innerHTML = `<span class="emoji">${e.emoji}</span><h2>${e.title}</h2><p>${e.blurb}</p>`;
+  grid.appendChild(a);
+  // When served over http, dim experiments whose branches aren't merged yet.
+  if (location.protocol.startsWith('http')) {
+    fetch(a.href, { method: 'HEAD' }).then(r => { if (!r.ok) a.classList.add('missing'); })
+      .catch(() => a.classList.add('missing'));
+  }
+}
+</script>
+</body>
+</html>
