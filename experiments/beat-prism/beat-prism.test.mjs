@@ -211,3 +211,427 @@ test('structure: HUD has BPM readout, sensitivity slider, six chips, file input'
   assert.equal((html.match(/class="chip"/g) ?? []).length, 6, 'six effect chips');
   assert.match(html, /type="file"[^>]*accept="video\/\*"/, 'video file input');
 });
+
+// ════════════════════ fx-pack ════════════════════
+// docs/beat-prism-fx-pack — registry, beat grid, conductor, parameter math.
+
+// ---------- fx slice 1 — registry + parameter math ----------
+
+const NEW_IDS = {
+  color: ['hue-spin', 'posterize', 'invert-strobe', 'duotone', 'sat-pump',
+          'bleach-burn', 'thermal', 'channel-swap', 'neon-edge',
+          'gamma-flicker', 'color-drain', 'sepia-ghost'],
+  geometry: ['rotate-jolt', 'kaleidoscope', 'mirror-flip', 'tile-grid',
+             'pixelate', 'slice-glitch', 'v-slice', 'squash', 'skew-tilt',
+             'spin-zoom'],
+  temporal: ['echo-trails', 'motion-ghost', 'strobe-black', 'freeze-frame',
+             'stutter-loop', 'time-smear', 'droste', 'interlace-roll'],
+  overlay: ['scanlines', 'vhs-band', 'grain-burst', 'vignette-pump',
+            'letterbox-snap', 'starburst', 'shockwave'],
+  scene: ['lightning', 'confetti', 'glyph-pop'],
+};
+const ORIGINAL_CAT = {
+  zoom: 'geometry', flash: 'color', shake: 'geometry',
+  burst: 'scene', chroma: 'color', glow: 'overlay',
+};
+
+test('registry: 46 entries with unique ids', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  assert.equal(FX_REGISTRY.length, 46);
+  assert.equal(new Set(FX_REGISTRY.map(e => e.id)).size, 46);
+});
+
+test('registry: canonical ids — all 40 new effects and the original six', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  const ids = new Set(FX_REGISTRY.map(e => e.id));
+  for (const cat of Object.keys(NEW_IDS)) {
+    for (const id of NEW_IDS[cat]) assert.ok(ids.has(id), `missing ${id}`);
+  }
+  for (const id of Object.keys(ORIGINAL_CAT)) assert.ok(ids.has(id), `missing ${id}`);
+});
+
+test('registry: exact category counts (new 12/10/8/7/3, originals mapped)', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  const byId = new Map(FX_REGISTRY.map(e => [e.id, e]));
+  for (const [cat, ids] of Object.entries(NEW_IDS)) {
+    for (const id of ids) assert.equal(byId.get(id)?.cat, cat, `${id} → ${cat}`);
+  }
+  for (const [id, cat] of Object.entries(ORIGINAL_CAT)) {
+    assert.equal(byId.get(id)?.cat, cat, `${id} → ${cat}`);
+  }
+  const count = cat => FX_REGISTRY.filter(e => e.cat === cat).length;
+  assert.equal(count('color'), 14);
+  assert.equal(count('geometry'), 12);
+  assert.equal(count('temporal'), 8);
+  assert.equal(count('overlay'), 8);
+  assert.equal(count('scene'), 4);
+});
+
+test('registry: every entry has a name, a valid kind, and a boolean heavy flag', () => {
+  const { FX_REGISTRY } = loadLogic(HTML);
+  for (const e of FX_REGISTRY) {
+    assert.equal(typeof e.name, 'string', `${e.id} name`);
+    assert.ok(e.name.length > 0, `${e.id} name non-empty`);
+    assert.ok(['pulse', 'continuous', 'scheduled'].includes(e.kind), `${e.id} kind ${e.kind}`);
+    assert.equal(typeof e.heavy, 'boolean', `${e.id} heavy`);
+  }
+});
+
+test('mulberry32: deterministic per seed, in [0,1), seeds diverge', () => {
+  const { mulberry32 } = loadLogic(HTML);
+  const a = mulberry32(42), b = mulberry32(42), c = mulberry32(43);
+  const seqA = Array.from({ length: 8 }, () => a());
+  const seqB = Array.from({ length: 8 }, () => b());
+  const seqC = Array.from({ length: 8 }, () => c());
+  assert.deepEqual(seqA, seqB, 'same seed, same sequence');
+  assert.notDeepEqual(seqA, seqC, 'different seed, different sequence');
+  for (const v of seqA) assert.ok(v >= 0 && v < 1, `out of range: ${v}`);
+});
+
+test('latencyMs: FFT window center plus one rAF', () => {
+  const { latencyMs } = loadLogic(HTML);
+  // 1024/44100 s ≈ 23.22 ms, + 16 ms ≈ 39.22 ms
+  assert.ok(Math.abs(latencyMs(2048, 44100) - 39.22) < 0.1, `${latencyMs(2048, 44100)}`);
+  assert.ok(Math.abs(latencyMs(2048, 48000) - 37.33) < 0.1, `${latencyMs(2048, 48000)}`);
+});
+
+test('sliceOffsets: deterministic, right length, bounded, not flat', () => {
+  const { sliceOffsets } = loadLogic(HTML);
+  const a = sliceOffsets(7, 12, 40);
+  assert.deepEqual(a, sliceOffsets(7, 12, 40), 'deterministic per seed');
+  assert.notDeepEqual(a, sliceOffsets(8, 12, 40), 'seed changes offsets');
+  assert.equal(a.length, 12);
+  for (const v of a) assert.ok(Math.abs(v) <= 40, `|${v}| ≤ 40`);
+  assert.ok(new Set(a).size > 1, 'offsets vary');
+});
+
+test('wedgeAngles: n evenly spaced wedge starts from 0', () => {
+  const { wedgeAngles } = loadLogic(HTML);
+  const w = wedgeAngles(6);
+  assert.equal(w.length, 6);
+  assert.equal(w[0], 0);
+  const step = Math.PI * 2 / 6;
+  for (let i = 1; i < 6; i++) {
+    assert.ok(Math.abs(w[i] - i * step) < 1e-12, `wedge ${i}`);
+  }
+});
+
+test('posterizeCurve: quantizes into levels, clamps input', () => {
+  const { posterizeCurve } = loadLogic(HTML);
+  assert.equal(posterizeCurve(0, 4), 0);
+  assert.equal(posterizeCurve(1, 4), 1);
+  assert.equal(posterizeCurve(0.4, 2), 0);
+  assert.equal(posterizeCurve(0.6, 2), 1);
+  assert.ok(Math.abs(posterizeCurve(0.5, 3) - 0.5) < 1e-12, 'mid level of 3');
+  assert.equal(posterizeCurve(1.5, 4), 1, 'clamps high');
+  assert.equal(posterizeCurve(-0.5, 4), 0, 'clamps low');
+});
+
+// ---------- fx slice 2 — beat grid phase lock ----------
+
+// Feed a train of onsets through the grid, one stepGrid call per onset.
+const feedGrid = (stepGrid, times, bpm, opts) => {
+  let g = null;
+  for (const t of times) g = stepGrid(g, t, bpm, t, opts);
+  return g;
+};
+const beatTrain = (bpm, n, jitter = 0) => Array.from(
+  { length: n },
+  (_, i) => i * (60000 / bpm) + (jitter ? Math.sin(i * 7.3) * jitter : 0),
+);
+
+test('stepGrid: first onset seeds the anchor; bpm sets the period', () => {
+  const { stepGrid } = loadLogic(HTML);
+  const g = stepGrid(null, 1000, 120, 1000);
+  assert.equal(g.anchorMs, 1000);
+  assert.equal(g.periodMs, 500);
+  assert.equal(g.onsetCount, 1);
+  assert.equal(g.confident, false, 'one onset is not confidence');
+});
+
+test('stepGrid: 120 BPM train with ±10 ms jitter → confident, phase on the true grid', () => {
+  const { stepGrid } = loadLogic(HTML);
+  const g = feedGrid(stepGrid, beatTrain(120, 8, 10), 120);
+  assert.equal(g.confident, true, '8 onsets + bpm → confident');
+  // anchor must sit on the true beat closest to the last onset (3500 ms)
+  assert.ok(Math.abs(g.anchorMs - 3500) <= 25, `anchor ${g.anchorMs} near 3500`);
+});
+
+test('stepGrid: onset 40 ms late inside the ±90 ms window re-locks by lerp 0.35', () => {
+  const { stepGrid } = loadLogic(HTML);
+  let g = feedGrid(stepGrid, beatTrain(120, 8), 120);   // clean → anchor exactly 3500
+  assert.equal(g.anchorMs, 3500);
+  g = stepGrid(g, 4040, 120, 4040);                     // predicted 4000, off +40
+  assert.ok(Math.abs(g.anchorMs - 4014) < 1e-9, `anchor ${g.anchorMs} = 4000 + 0.35·40`);
+});
+
+test('stepGrid: off-grid onsets are ignored by a confident clock', () => {
+  const { stepGrid } = loadLogic(HTML);
+  let g = feedGrid(stepGrid, beatTrain(120, 8), 120);
+  const count = g.onsetCount;
+  g = stepGrid(g, 4250, 120, 4250);   // 250 ms from both neighbors — outside ±90
+  assert.equal(g.anchorMs, 3500, 'anchor untouched');
+  assert.equal(g.onsetCount, count + 1, 'onset still counted');
+  assert.equal(g.confident, true);
+});
+
+test('stepGrid: free-runs through a 3 s quiet gap without losing the clock', () => {
+  const { stepGrid } = loadLogic(HTML);
+  let g = feedGrid(stepGrid, beatTrain(120, 8), 120);
+  g = stepGrid(g, null, 120, 6400);   // frame tick 2.9 s after the last onset
+  assert.equal(g.confident, true, 'still confident inside 4 s');
+  assert.equal(g.anchorMs, 3500, 'clock untouched while free-running');
+  assert.equal(g.periodMs, 500);
+});
+
+test('stepGrid: confidence lapses after 4 s without onsets and needs 8 fresh onsets', () => {
+  const { stepGrid } = loadLogic(HTML);
+  let g = feedGrid(stepGrid, beatTrain(120, 8), 120);
+  g = stepGrid(g, null, 120, 7600);   // 4.1 s after the last onset
+  assert.equal(g.confident, false, 'confidence lapsed');
+  g = stepGrid(g, 8000, 120, 8000);   // one onset is not enough to re-confirm
+  assert.equal(g.confident, false, 'needs 8 fresh onsets');
+  assert.equal(g.onsetCount, 1);
+});
+
+test('stepGrid: opts.latencyMs shifts onset timestamps back before phase math', () => {
+  const { stepGrid, latencyMs } = loadLogic(HTML);
+  const L = latencyMs(2048, 44100);
+  const raw = feedGrid(stepGrid, beatTrain(120, 8), 120);
+  const comp = feedGrid(stepGrid, beatTrain(120, 8), 120, { latencyMs: L });
+  assert.ok(Math.abs((raw.anchorMs - comp.anchorMs) - L) < 1e-9,
+    `anchor shifted back by exactly ${L} ms`);
+});
+
+test('stepGrid: returns new state without mutating the input', () => {
+  const { stepGrid } = loadLogic(HTML);
+  const g = feedGrid(stepGrid, beatTrain(120, 8), 120);
+  const snapshot = JSON.parse(JSON.stringify(g));
+  stepGrid(g, 4040, 120, 4040);
+  stepGrid(g, null, 120, 9999);
+  assert.deepEqual(JSON.parse(JSON.stringify(g)), snapshot);
+});
+
+// ---------- fx slice 3 — grid events ----------
+
+// 8 clean onsets at 120 BPM → anchor 3500, period 500, anchor beat #7.
+const lockedGrid = stepGrid => feedGrid(stepGrid, beatTrain(120, 8), 120);
+
+test('gridEvents: beats crossed between two timestamps, in order', () => {
+  const { stepGrid, gridEvents } = loadLogic(HTML);
+  const ev = gridEvents(lockedGrid(stepGrid), 3600, 5100);
+  assert.deepEqual(ev.map(e => e.timeMs), [4000, 4500, 5000]);
+  assert.deepEqual(ev.map(e => e.beatIndex), [8, 9, 10]);
+});
+
+test('gridEvents: half-open windows never double-fire a beat', () => {
+  const { stepGrid, gridEvents } = loadLogic(HTML);
+  const g = lockedGrid(stepGrid);
+  // boundary lands exactly on the 4000 ms beat: it belongs to the first window
+  const a = gridEvents(g, 3600, 4000);
+  const b = gridEvents(g, 4000, 5100);
+  assert.deepEqual(a.map(e => e.timeMs), [4000]);
+  assert.deepEqual(b.map(e => e.timeMs), [4500, 5000]);
+});
+
+test('gridEvents: every 4th beat is a bar with the right barIndex', () => {
+  const { stepGrid, gridEvents } = loadLogic(HTML);
+  const ev = gridEvents(lockedGrid(stepGrid), 3500, 7500);   // beats 8..15
+  assert.equal(ev.length, 8);
+  const bars = ev.filter(e => e.isBar);
+  assert.deepEqual(bars.map(e => e.beatIndex), [8, 12]);
+  assert.deepEqual(bars.map(e => e.barIndex), [2, 3]);
+  for (const e of ev) assert.equal(e.barIndex, Math.floor(e.beatIndex / 4));
+});
+
+test('gridEvents: silent unless the grid is confident', () => {
+  const { stepGrid, gridEvents } = loadLogic(HTML);
+  let g = lockedGrid(stepGrid);
+  g = stepGrid(g, null, 120, 7600);   // lapse
+  assert.deepEqual(gridEvents(g, 3600, 5100), []);
+  assert.deepEqual(gridEvents(stepGrid(null, 0, 120, 0), 0, 5000), [], 'one onset, no confidence');
+});
+
+test('gridEvents: degenerate or reversed windows yield nothing', () => {
+  const { stepGrid, gridEvents } = loadLogic(HTML);
+  const g = lockedGrid(stepGrid);
+  assert.deepEqual(gridEvents(g, 5000, 5000), []);
+  assert.deepEqual(gridEvents(g, 5100, 3600), []);
+});
+
+// ---------- fx slice 4 — shuffle conductor ----------
+
+test('dealHand: deterministic per seed', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const all = FX_REGISTRY.map(e => e.id);
+  assert.deepEqual(dealHand(FX_REGISTRY, 5, all), dealHand(FX_REGISTRY, 5, all));
+});
+
+test('dealHand: deals 4–6 effects from a full pool', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const all = FX_REGISTRY.map(e => e.id);
+  for (let seed = 0; seed < 12; seed++) {
+    const hand = dealHand(FX_REGISTRY, seed, all);
+    assert.ok(hand.length >= 4 && hand.length <= 6, `seed ${seed}: ${hand.length}`);
+    assert.equal(new Set(hand).size, hand.length, 'no duplicates');
+  }
+});
+
+test('dealHand: at most 2 per category and at most 2 heavy', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const all = FX_REGISTRY.map(e => e.id);
+  const byId = new Map(FX_REGISTRY.map(e => [e.id, e]));
+  for (let seed = 0; seed < 40; seed++) {
+    const hand = dealHand(FX_REGISTRY, seed, all).map(id => byId.get(id));
+    const perCat = {};
+    let heavies = 0;
+    for (const e of hand) {
+      perCat[e.cat] = (perCat[e.cat] ?? 0) + 1;
+      if (e.heavy) heavies++;
+    }
+    for (const [cat, n] of Object.entries(perCat)) {
+      assert.ok(n <= 2, `seed ${seed}: ${n} from ${cat}`);
+    }
+    assert.ok(heavies <= 2, `seed ${seed}: ${heavies} heavy`);
+  }
+});
+
+test('dealHand: draws only from the enabled pool', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const enabled = ['hue-spin', 'kaleidoscope', 'echo-trails', 'scanlines',
+                   'lightning', 'zoom', 'posterize', 'shockwave'];
+  for (let seed = 0; seed < 12; seed++) {
+    for (const id of dealHand(FX_REGISTRY, seed, enabled)) {
+      assert.ok(enabled.includes(id), `seed ${seed} dealt disabled ${id}`);
+    }
+  }
+});
+
+test('dealHand: different seeds eventually deal different hands', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const all = FX_REGISTRY.map(e => e.id);
+  const first = JSON.stringify(dealHand(FX_REGISTRY, 0, all));
+  assert.ok(
+    Array.from({ length: 20 }, (_, s) => s + 1)
+      .some(s => JSON.stringify(dealHand(FX_REGISTRY, s, all)) !== first),
+    'twenty consecutive seeds never changed the hand');
+});
+
+test('dealHand: a pool smaller than 4 deals the whole pool', () => {
+  const { dealHand, FX_REGISTRY } = loadLogic(HTML);
+  const enabled = ['hue-spin', 'shockwave'];
+  const hand = dealHand(FX_REGISTRY, 3, enabled);
+  assert.deepEqual([...hand].sort(), [...enabled].sort());
+});
+
+test('ringIndex: wraps backward through a 12-slot ring', () => {
+  const { ringIndex } = loadLogic(HTML);
+  assert.equal(ringIndex(5, 0, 12), 5);
+  assert.equal(ringIndex(0, 1, 12), 11);
+  assert.equal(ringIndex(3, 15, 12), 0);   // wraps a full lap and a bit
+  assert.equal(ringIndex(7, 3, 12), 4);
+});
+
+// ---------- fx slice 5 — app integration (structural) ----------
+
+const appScript = () => {
+  const html = readFileSync(HTML, 'utf8');
+  // the app script is the <script> block without the id="logic" attribute
+  const blocks = [...html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+    .filter(m => !(m[1] ?? '').includes('id="logic"'));
+  assert.equal(blocks.length, 1, 'exactly one app script block');
+  return blocks[0][2];
+};
+
+test('structure: logic block exports the fx-pack surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['stepGrid', 'gridEvents', 'dealHand', 'mulberry32',
+                    'latencyMs', 'sliceOffsets', 'wedgeAngles',
+                    'posterizeCurve', 'ringIndex']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(Array.isArray(logic.FX_REGISTRY), 'FX_REGISTRY is data');
+});
+
+test('structure: both script blocks parse in Node', () => {
+  const html = readFileSync(HTML, 'utf8');
+  const blocks = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
+  assert.equal(blocks.length, 2, 'logic block + app block');
+  for (const [, src] of blocks) assert.doesNotThrow(() => new Function(src));
+});
+
+test('structure: HUD gains drawer, shuffle toggle and beat-locked dot', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="drawer"/, 'effects drawer');
+  assert.match(html, /id="shuffle"[^>]*type="checkbox"/, 'shuffle toggle');
+  assert.match(html, /id="beatdot"/, 'beat dot next to the BPM readout');
+  assert.match(html, /id="drawerbtn"/, 'drawer button');
+});
+
+test('structure: keys r/e/0/9 bound; the 1-6 effect keys are retired', () => {
+  const app = appScript();
+  for (const k of ['r', 'e', '0', '9']) {
+    assert.ok(app.includes(`e.key === '${k}'`), `key ${k} bound`);
+  }
+  assert.ok(!app.includes("e.key >= '1'"), 'numeric effect keys retired');
+});
+
+test('structure: app drives the registry pipeline through the grid', () => {
+  const app = appScript();
+  for (const call of ['FX_REGISTRY', 'stepGrid(', 'gridEvents(',
+                      'dealHand(', 'latencyMs(']) {
+    assert.ok(app.includes(call), `app uses ${call}`);
+  }
+  assert.match(app, /checkbox/, 'drawer rows carry checkboxes');
+});
+
+test('structure: performance caps — 600 particles, 12-frame ring', () => {
+  const app = appScript();
+  assert.match(app, /PARTICLE_CAP\s*=\s*600/);
+  assert.match(app, /RING_SIZE\s*=\s*12/);
+});
+
+// ---------- fx slice 6 — transport controls (design addendum) ----------
+
+test('formatTime: m:ss with zero-padded seconds; degenerate input → 0:00', () => {
+  const { formatTime } = loadLogic(HTML);
+  assert.equal(formatTime(0), '0:00');
+  assert.equal(formatTime(5.4), '0:05');
+  assert.equal(formatTime(59.9), '0:59');
+  assert.equal(formatTime(65), '1:05');
+  assert.equal(formatTime(600), '10:00');
+  assert.equal(formatTime(NaN), '0:00');
+  assert.equal(formatTime(Infinity), '0:00');
+  assert.equal(formatTime(-3), '0:00');
+});
+
+test('seekTarget: clamps the jump into [0, duration]', () => {
+  const { seekTarget } = loadLogic(HTML);
+  assert.equal(seekTarget(10, 100, 5), 15);
+  assert.equal(seekTarget(10, 100, -5), 5);
+  assert.equal(seekTarget(2, 100, -30), 0);
+  assert.equal(seekTarget(98, 100, 30), 100);
+});
+
+test('seekTarget: degenerate duration holds the current position', () => {
+  const { seekTarget } = loadLogic(HTML);
+  assert.equal(seekTarget(12, NaN, 5), 12);     // metadata not loaded yet
+  assert.equal(seekTarget(12, Infinity, 5), 12); // streams have no timeline
+  assert.equal(seekTarget(-4, 0, 5), 0);
+});
+
+test('structure: transport bar with play/pause, seek bar and time readout', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="transport"/, 'transport bar');
+  assert.match(html, /id="playbtn"/, 'play/pause button');
+  assert.match(html, /id="seek"[^>]*type="range"/, 'scrubbable seek bar');
+  assert.match(html, /id="time"/, 'elapsed/total readout');
+});
+
+test('structure: arrow keys seek through the pure helpers', () => {
+  const app = appScript();
+  assert.ok(app.includes("'ArrowRight'"), 'ArrowRight bound');
+  assert.ok(app.includes("'ArrowLeft'"), 'ArrowLeft bound');
+  assert.ok(app.includes('seekTarget('), 'app uses seekTarget');
+  assert.ok(app.includes('formatTime('), 'app uses formatTime');
+});
