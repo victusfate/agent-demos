@@ -75,9 +75,12 @@ function balanced(s) {
 }
 
 // validate: null when the system is safe to derive, otherwise a gentle
-// error string. The symbol budget is checked by counting symbols per
-// derivation (no string is ever built), so runaway systems abort cheaply.
-function validate(axiom, rules, n, maxSymbols = 60000) {
+// error string. Budgets are checked by counting symbols per derivation
+// (no string is ever built), so runaway systems abort cheaply. The budget
+// that matters is drawn segments (F count, capped at maxSegments); total
+// symbols get a generous safety cap so silent-symbol blowups abort too.
+function validate(axiom, rules, n, maxSegments = 60000) {
+  const maxSymbols = Math.max(maxSegments * 16, 1e6);
   if (!axiom || !axiom.trim()) return 'the axiom is empty';
   if (!balanced(axiom)) return 'unbalanced brackets in the axiom';
   for (const [k, v] of Object.entries(rules)) {
@@ -94,6 +97,7 @@ function validate(axiom, rules, n, maxSymbols = 60000) {
       }
     }
     for (const c of Object.values(next)) total += c;
+    if ((next.F || 0) > maxSegments) return `derivation explodes past ${maxSegments.toLocaleString()} segments at pass ${i + 1}`;
     if (total > maxSymbols) return `derivation explodes past ${maxSymbols.toLocaleString()} symbols at pass ${i + 1}`;
     counts = next;
   }
@@ -137,7 +141,18 @@ function mutate(rules, rng) {
   return out;
 }
 
-globalThis.__logic = { expand, interpret, validate, mutate };
+// Six shipped systems. Iteration counts are tuned so every preset lands
+// well under the 60k-segment budget (see tests).
+const PRESETS = {
+  Fern:      { axiom: 'X',       rules: { X: 'F+[[X]-X]-F[-FX]+X', F: 'FF' }, angle: 25,   iterations: 7 },
+  Weed:      { axiom: 'F',       rules: { F: 'F[+F]F[-F]F' },                 angle: 22.5, iterations: 5 },
+  Bush:      { axiom: 'F',       rules: { F: 'FF+[+F-F-F]-[-F+F+F]' },        angle: 22.5, iterations: 4 },
+  Snowflake: { axiom: 'F--F--F', rules: { F: 'F+F--F+F' },                    angle: 60,   iterations: 5 },
+  Dragon:    { axiom: 'FX',      rules: { X: 'X+YF+', Y: '-FX-Y' },           angle: 90,   iterations: 13 },
+  Sparse:    { axiom: 'X',       rules: { X: 'F[+X][-X]FX', F: 'FF' },        angle: 25.7, iterations: 7 },
+};
+
+globalThis.__logic = { expand, interpret, validate, mutate, PRESETS };
 })();
 </script>
 </body>
