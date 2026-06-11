@@ -642,6 +642,17 @@ function frame(ms) {
 // ---------- boot: tresillo armed, waiting for the first gesture ----------
 applyPreset(PRESETS[0]);
 requestAnimationFrame(frame);
+
+// read-only handle for the headless acceptance run
+globalThis.__app = {
+  ringSpecs: () => rings.map(r => ({ k: r.k, n: r.n })),
+  isPlaying: () => playing,
+  bpm: () => bpm,
+  ringCenter: ring => {
+    const R = ringRadius(rings[ring]);
+    return { x: CX + R, y: CY };
+  },
+};
 </script>
 </body>
 </html>
