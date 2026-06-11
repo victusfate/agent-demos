@@ -113,3 +113,77 @@ test('scheduleTimes on an empty pattern is empty', () => {
   assert.deepEqual(scheduleTimes(euclid(0, 8), 0.25, 0), []);
   assert.deepEqual(scheduleTimes([], 0.25, 0), []);
 });
+
+// ---------- slice 3: presets + dice ----------
+
+const WORLD = [
+  ['Tresillo', 3, 8],
+  ['Cinquillo', 5, 8],
+  ['Khafif', 2, 5],
+  ['Money', 3, 7],
+  ['Samba', 7, 16],
+  ['Bossa', 5, 16],
+];
+
+test('PRESETS: six named world rhythms with their headline E(k,n)', () => {
+  const { PRESETS } = loadLogic(HTML);
+  assert.equal(PRESETS.length, 6);
+  for (const [name, k, n] of WORLD) {
+    const p = PRESETS.find(p => p.name === name);
+    assert.ok(p, `missing preset ${name}`);
+    assert.equal(p.k, k, `${name} headline k`);
+    assert.equal(p.n, n, `${name} headline n`);
+    assert.ok(
+      p.rings.some(r => r.k === k && r.n === n),
+      `${name}: headline E(${k},${n}) must land on one of its rings`,
+    );
+  }
+});
+
+test('PRESETS: every preset defines four valid ring specs (0 <= k <= n)', () => {
+  const { PRESETS } = loadLogic(HTML);
+  for (const p of PRESETS) {
+    assert.equal(p.rings.length, 4, `${p.name} must spec all four rings`);
+    for (const r of p.rings) {
+      assert.ok(Number.isInteger(r.k) && Number.isInteger(r.n), `${p.name} integer specs`);
+      assert.ok(r.k >= 0 && r.k <= r.n, `${p.name}: 0 <= k <= n`);
+      assert.ok(r.n >= 1 && r.n <= 16, `${p.name}: n within grid`);
+    }
+  }
+});
+
+// deterministic LCG so dice tests never flake
+const lcg = seed => () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+
+test('rollRings: four specs inside taste bounds, deterministic for a seed', () => {
+  const { rollRings } = loadLogic(HTML);
+  const a = rollRings(lcg(42));
+  const b = rollRings(lcg(42));
+  assert.deepEqual(a, b, 'same seed, same roll');
+  assert.equal(a.length, 4);
+  for (const r of a) {
+    assert.ok(Number.isInteger(r.k) && Number.isInteger(r.n));
+    assert.ok(r.n >= 4 && r.n <= 16, `n=${r.n} outside taste bounds`);
+    assert.ok(r.k >= 1 && r.k <= r.n, `k=${r.k} outside 1..n`);
+  }
+});
+
+test('rollRings: bounds hold across many seeds', () => {
+  const { rollRings } = loadLogic(HTML);
+  for (let seed = 0; seed < 200; seed++) {
+    for (const r of rollRings(lcg(seed))) {
+      assert.ok(r.n >= 4 && r.n <= 16 && r.k >= 1 && r.k <= r.n,
+        `seed ${seed}: E(${r.k},${r.n}) out of bounds`);
+    }
+  }
+});
+
+// ---------- structure ----------
+
+test('structure: logic block exports the full documented surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['euclid', 'rotate', 'patternString', 'scheduleTimes', 'rollRings']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(Array.isArray(logic.PRESETS), 'PRESETS must be an array');
+});
