@@ -114,6 +114,44 @@ test('stepOnset: returns new state without mutating the input', () => {
   assert.deepEqual(state, snapshot);
 });
 
+// ---------- slice 3 — tempo estimation ----------
+
+const train = (bpm, n, jitter = 0) => Array.from(
+  { length: n },
+  (_, i) => i * (60000 / bpm) + (jitter ? Math.sin(i * 7.3) * jitter : 0),
+);
+
+test('estimateBpm: null until at least 8 onsets', () => {
+  const { estimateBpm } = loadLogic(HTML);
+  assert.equal(estimateBpm([]), null);
+  assert.equal(estimateBpm(train(120, 7)), null);
+  assert.notEqual(estimateBpm(train(120, 8)), null);
+});
+
+test('estimateBpm: 120 BPM impulse train → 120 ± 2', () => {
+  const { estimateBpm } = loadLogic(HTML);
+  const bpm = estimateBpm(train(120, 12));
+  assert.ok(Math.abs(bpm - 120) <= 2, `expected ~120, got ${bpm}`);
+});
+
+test('estimateBpm: 60 BPM train folds up an octave to 120 ± 2', () => {
+  const { estimateBpm } = loadLogic(HTML);
+  const bpm = estimateBpm(train(60, 10));
+  assert.ok(Math.abs(bpm - 120) <= 2, `expected ~120, got ${bpm}`);
+});
+
+test('estimateBpm: 200 BPM train folds down an octave to 100 ± 2', () => {
+  const { estimateBpm } = loadLogic(HTML);
+  const bpm = estimateBpm(train(200, 16));
+  assert.ok(Math.abs(bpm - 100) <= 2, `expected ~100, got ${bpm}`);
+});
+
+test('estimateBpm: tolerates ±15 ms jitter on a 128 BPM train', () => {
+  const { estimateBpm } = loadLogic(HTML);
+  const bpm = estimateBpm(train(128, 24, 15));
+  assert.ok(Math.abs(bpm - 128) <= 2, `expected ~128, got ${bpm}`);
+});
+
 test('stepOnset: opts override k, window and refractoryMs', () => {
   const { stepOnset } = loadLogic(HTML);
   const fluxes = Array(40).fill(10);
