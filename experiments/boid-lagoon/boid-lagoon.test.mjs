@@ -1,0 +1,66 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { loadLogic } from '../_harness/logic.mjs';
+
+const HTML = new URL('./index.html', import.meta.url).pathname;
+
+const mag = v => Math.hypot(v.x, v.y);
+const dot = (a, b) => a.x * b.x + a.y * b.y;
+const close = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
+
+// ---------- slice 1 — vector hygiene ----------
+
+test('limit: leaves vectors at or under max untouched', () => {
+  const { limit } = loadLogic(HTML);
+  assert.deepEqual(limit({ x: 3, y: 4 }, 5), { x: 3, y: 4 });
+  assert.deepEqual(limit({ x: 0, y: 0 }, 5), { x: 0, y: 0 });
+  assert.deepEqual(limit({ x: -1, y: 2 }, 10), { x: -1, y: 2 });
+});
+
+test('limit: scales long vectors down to max, preserving direction', () => {
+  const { limit } = loadLogic(HTML);
+  const v = limit({ x: 30, y: 40 }, 5);
+  assert.ok(close(mag(v), 5), `expected magnitude 5, got ${mag(v)}`);
+  assert.ok(close(v.x / v.y, 30 / 40), 'direction must be preserved');
+  assert.ok(v.x > 0 && v.y > 0, 'quadrant must be preserved');
+});
+
+test('clampSpeed: speed inside [min, max] passes through unchanged', () => {
+  const { clampSpeed } = loadLogic(HTML);
+  const v = clampSpeed({ x: 3, y: 4 }, 2, 10); // speed 5
+  assert.deepEqual(v, { x: 3, y: 4 });
+});
+
+test('clampSpeed: too-fast vectors are scaled to max, direction preserved', () => {
+  const { clampSpeed } = loadLogic(HTML);
+  const v = clampSpeed({ x: 30, y: -40 }, 2, 10); // speed 50
+  assert.ok(close(mag(v), 10), `expected speed 10, got ${mag(v)}`);
+  assert.ok(dot(v, { x: 30, y: -40 }) > 0, 'direction must be preserved');
+  assert.ok(close(v.x * -40, v.y * 30), 'must stay collinear with input');
+});
+
+test('clampSpeed: too-slow nonzero vectors are scaled up to min, direction preserved', () => {
+  const { clampSpeed } = loadLogic(HTML);
+  const v = clampSpeed({ x: 0.03, y: 0.04 }, 2, 10); // speed 0.05
+  assert.ok(close(mag(v), 2), `expected speed 2, got ${mag(v)}`);
+  assert.ok(dot(v, { x: 0.03, y: 0.04 }) > 0, 'direction must be preserved');
+});
+
+test('clampSpeed: the zero vector gets a deterministic nonzero fallback at min', () => {
+  const { clampSpeed } = loadLogic(HTML);
+  const a = clampSpeed({ x: 0, y: 0 }, 2, 10);
+  const b = clampSpeed({ x: 0, y: 0 }, 2, 10);
+  assert.ok(close(mag(a), 2), `fallback speed must be min, got ${mag(a)}`);
+  assert.deepEqual(a, b, 'fallback must be deterministic');
+});
+
+test('clampSpeed: never returns a speed outside [min, max] across a sweep', () => {
+  const { clampSpeed } = loadLogic(HTML);
+  for (let i = 0; i < 50; i++) {
+    const ang = (i / 50) * Math.PI * 2;
+    const s = i * 0.4; // speeds 0 .. 19.6
+    const v = clampSpeed({ x: Math.cos(ang) * s, y: Math.sin(ang) * s }, 1.5, 6);
+    const m = mag(v);
+    assert.ok(m >= 1.5 - 1e-9 && m <= 6 + 1e-9, `speed ${m} escaped [1.5, 6]`);
+  }
+});
