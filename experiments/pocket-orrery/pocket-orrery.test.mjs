@@ -231,3 +231,20 @@ test('stepBodies: circular-orbit speed sqrt(G*M/r) holds radius within ±5% over
     assert.ok(Math.abs(rr - r) / r < 0.05, `radius ${rr} drifted >5% from ${r} at step ${i}`);
   }
 });
+
+// ---------- slice 4 — structural acceptance ----------
+
+test('structure: exactly one logic block, loadable without a browser', () => {
+  assert.doesNotThrow(() => loadLogic(HTML));
+});
+
+test('structure: logic block exports the full documented surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['stepBodies', 'gravityAccel', 'mergeBodies', 'orbitCount', 'noteForMass']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(Array.isArray(logic.SCALE), 'SCALE (pentatonic semitone offsets) must be an array');
+  for (let i = 1; i < logic.SCALE.length; i++) {
+    assert.ok(logic.SCALE[i] > logic.SCALE[i - 1], 'SCALE must ascend');
+  }
+});
