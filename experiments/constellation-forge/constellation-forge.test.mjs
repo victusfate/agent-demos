@@ -60,3 +60,48 @@ test('nearestStar: -1 beyond maxR and on an empty list', () => {
   assert.equal(nearestStar(stars, 10 + 29, 10, 30), 0, 'just inside radius');
   assert.equal(nearestStar([], 0, 0, 1e9), -1);
 });
+
+// ---------- slice 2: figure identity ----------
+
+test('figureHash: deterministic integer, order-sensitive, figure-sensitive', () => {
+  const { figureHash } = loadLogic(HTML);
+  const fig = [3, 17, 42, 8, 99];
+  const h = figureHash(fig);
+  assert.equal(typeof h, 'number');
+  assert.ok(Number.isInteger(h), 'hash must be an integer');
+  assert.equal(figureHash(fig), h, 'same figure must hash identically');
+  assert.notEqual(figureHash([...fig].reverse()), h, 'reversed order must differ');
+  assert.notEqual(figureHash([3, 17, 42, 8, 100]), h, 'different figure must differ');
+  assert.notEqual(figureHash([3, 17, 42, 8]), h, 'prefix figure must differ');
+});
+
+test('figureTraits: closed iff first index === last index', () => {
+  const { figureTraits, makeSky } = loadLogic(HTML);
+  const stars = makeSky(1, 800, 600, 20);
+  assert.equal(figureTraits([0, 5, 9, 0], stars, 800, 600).closed, true);
+  assert.equal(figureTraits([0, 5, 9, 4], stars, 800, 600).closed, false);
+  assert.equal(figureTraits([2], stars, 800, 600).closed, false, 'single star is not a loop');
+});
+
+test('figureTraits: stars counts distinct stars', () => {
+  const { figureTraits, makeSky } = loadLogic(HTML);
+  const stars = makeSky(1, 800, 600, 20);
+  assert.equal(figureTraits([0, 5, 9, 0], stars, 800, 600).stars, 3);
+  assert.equal(figureTraits([0, 5, 9, 4], stars, 800, 600).stars, 4);
+});
+
+test('figureTraits: spanRatio = max pairwise distance over chart diagonal', () => {
+  const { figureTraits } = loadLogic(HTML);
+  const w = 300, h = 400; // diagonal 500
+  const stars = [
+    { x: 0, y: 0, mag: 1 },
+    { x: 300, y: 400, mag: 1 },
+    { x: 150, y: 200, mag: 1 },
+  ];
+  const t = figureTraits([0, 2, 1], stars, w, h);
+  assert.ok(Math.abs(t.spanRatio - 1) < 1e-9, `corner-to-corner should be ~1, got ${t.spanRatio}`);
+  const tiny = figureTraits([2], stars, w, h);
+  assert.equal(tiny.spanRatio, 0, 'a single star spans nothing');
+  const half = figureTraits([0, 2], stars, w, h);
+  assert.ok(Math.abs(half.spanRatio - 0.5) < 1e-9, `half-diagonal should be ~0.5, got ${half.spanRatio}`);
+});
