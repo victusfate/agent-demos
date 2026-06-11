@@ -103,7 +103,11 @@ function estimateBpm(onsetTimesMs) {
   return 60000 / (near.reduce((a, b) => a + b, 0) / near.length);
 }
 
-globalThis.__logic = { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm };
+// Frame-rate-independent exponential decay for beat-triggered effect
+// pulses: the value halves every halfLifeMs.
+const decayPulse = (value, dtMs, halfLifeMs) => value * Math.pow(2, -dtMs / halfLifeMs);
+
+globalThis.__logic = { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse };
 })();
 </script>
 <script>
