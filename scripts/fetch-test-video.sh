@@ -17,8 +17,10 @@
 # --hq merges the best separate video+audio streams (4K/8K where offered)
 # instead of the best single-file mp4 (~720p on YouTube). Above 1080p
 # YouTube serves VP9/AV1, so the result is usually .webm/.mkv — fine for
-# Chrome/Edge. Note: without a JS runtime (deno) yt-dlp may not see the
-# very top formats.
+# Chrome/Edge. Seeing the full format ladder requires a JS runtime (deno
+# or node) plus yt-dlp's remotely-fetched EJS solver, which is opt-in;
+# this script passes --remote-components ejs:github to enable it (cached
+# locally after the first run).
 #
 # Requires yt-dlp (pip install yt-dlp | brew install yt-dlp); sampling and
 # --hq also require ffmpeg (section cutting / stream muxing).
@@ -83,6 +85,7 @@ mkdir -p "$OUT_DIR"
 
 yt-dlp \
   --no-playlist \
+  --remote-components ejs:github \
   -f "$FMT" \
   --print after_move:filepath \
   --no-simulate \
