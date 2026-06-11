@@ -64,7 +64,80 @@ function interpret(s, { angle, step }) {
   return { segments, bounds: { minX, minY, maxX, maxY } };
 }
 
-globalThis.__logic = { expand, interpret };
+// brackets balanced: counter never dips below zero, ends at zero
+function balanced(s) {
+  let d = 0;
+  for (const ch of s) {
+    if (ch === '[') d++;
+    else if (ch === ']' && --d < 0) return false;
+  }
+  return d === 0;
+}
+
+// validate: null when the system is safe to derive, otherwise a gentle
+// error string. The symbol budget is checked by counting symbols per
+// derivation (no string is ever built), so runaway systems abort cheaply.
+function validate(axiom, rules, n, maxSymbols = 60000) {
+  if (!axiom || !axiom.trim()) return 'the axiom is empty';
+  if (!balanced(axiom)) return 'unbalanced brackets in the axiom';
+  for (const [k, v] of Object.entries(rules)) {
+    if (!balanced(v)) return `unbalanced brackets in the ${k} rule`;
+  }
+  let counts = {};
+  for (const ch of axiom) counts[ch] = (counts[ch] || 0) + 1;
+  for (let i = 0; i < n; i++) {
+    const next = {};
+    let total = 0;
+    for (const [sym, c] of Object.entries(counts)) {
+      for (const ch of rules[sym] ?? sym) {
+        next[ch] = (next[ch] || 0) + c;
+      }
+    }
+    for (const c of Object.values(next)) total += c;
+    if (total > maxSymbols) return `derivation explodes past ${maxSymbols.toLocaleString()} symbols at pass ${i + 1}`;
+    counts = next;
+  }
+  return null;
+}
+
+// mutate: one structural perturbation — flip a turn sign, or duplicate a
+// bracketed branch clause. Never touches the input; rng in [0,1).
+function mutate(rules, rng) {
+  const keys = Object.keys(rules);
+  const candidates = [];
+  for (const k of keys) {
+    const v = rules[k];
+    for (let i = 0; i < v.length; i++) {
+      const ch = v[i];
+      if (ch === '+' || ch === '-') {
+        candidates.push({ k, apply: s => s.slice(0, i) + (ch === '+' ? '-' : '+') + s.slice(i + 1) });
+      } else if (ch === '[') {
+        // find the matching ] and duplicate the whole clause
+        let d = 0;
+        for (let j = i; j < v.length; j++) {
+          if (v[j] === '[') d++;
+          else if (v[j] === ']' && --d === 0) {
+            const clause = v.slice(i, j + 1);
+            candidates.push({ k, apply: s => s.slice(0, j + 1) + clause + s.slice(j + 1) });
+            break;
+          }
+        }
+      }
+    }
+  }
+  const out = { ...rules };
+  if (!candidates.length) {
+    // featureless rules: graft a small branch onto the first rule
+    const k = keys[0];
+    if (k !== undefined) out[k] = rules[k] + '[+F]';
+    return out;
+  }
+  const pick = candidates[Math.floor(rng() * candidates.length) % candidates.length];
+  out[pick.k] = pick.apply(rules[pick.k]);
+  return out;
+}
+
+globalThis.__logic = { expand, interpret, validate, mutate };
 })();
 </script>
 </body>
