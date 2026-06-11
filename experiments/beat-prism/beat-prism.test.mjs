@@ -590,3 +590,48 @@ test('structure: performance caps — 600 particles, 12-frame ring', () => {
   assert.match(app, /PARTICLE_CAP\s*=\s*600/);
   assert.match(app, /RING_SIZE\s*=\s*12/);
 });
+
+// ---------- fx slice 6 — transport controls (design addendum) ----------
+
+test('formatTime: m:ss with zero-padded seconds; degenerate input → 0:00', () => {
+  const { formatTime } = loadLogic(HTML);
+  assert.equal(formatTime(0), '0:00');
+  assert.equal(formatTime(5.4), '0:05');
+  assert.equal(formatTime(59.9), '0:59');
+  assert.equal(formatTime(65), '1:05');
+  assert.equal(formatTime(600), '10:00');
+  assert.equal(formatTime(NaN), '0:00');
+  assert.equal(formatTime(Infinity), '0:00');
+  assert.equal(formatTime(-3), '0:00');
+});
+
+test('seekTarget: clamps the jump into [0, duration]', () => {
+  const { seekTarget } = loadLogic(HTML);
+  assert.equal(seekTarget(10, 100, 5), 15);
+  assert.equal(seekTarget(10, 100, -5), 5);
+  assert.equal(seekTarget(2, 100, -30), 0);
+  assert.equal(seekTarget(98, 100, 30), 100);
+});
+
+test('seekTarget: degenerate duration holds the current position', () => {
+  const { seekTarget } = loadLogic(HTML);
+  assert.equal(seekTarget(12, NaN, 5), 12);     // metadata not loaded yet
+  assert.equal(seekTarget(12, Infinity, 5), 12); // streams have no timeline
+  assert.equal(seekTarget(-4, 0, 5), 0);
+});
+
+test('structure: transport bar with play/pause, seek bar and time readout', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="transport"/, 'transport bar');
+  assert.match(html, /id="playbtn"/, 'play/pause button');
+  assert.match(html, /id="seek"[^>]*type="range"/, 'scrubbable seek bar');
+  assert.match(html, /id="time"/, 'elapsed/total readout');
+});
+
+test('structure: arrow keys seek through the pure helpers', () => {
+  const app = appScript();
+  assert.ok(app.includes("'ArrowRight'"), 'ArrowRight bound');
+  assert.ok(app.includes("'ArrowLeft'"), 'ArrowLeft bound');
+  assert.ok(app.includes('seekTarget('), 'app uses seekTarget');
+  assert.ok(app.includes('formatTime('), 'app uses formatTime');
+});
