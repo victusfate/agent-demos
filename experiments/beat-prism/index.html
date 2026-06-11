@@ -39,7 +39,43 @@ function bandEnergy(spectrum, lo, hi) {
   return sum / (b - a);
 }
 
-globalThis.__logic = { spectralFlux, bandEnergy };
+const median = sorted => {
+  const n = sorted.length, m = n >> 1;
+  return n % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+};
+
+// Adaptive onset threshold: mean + k · MAD over the flux history window,
+// where MAD is the *median* absolute deviation — robust to the onset
+// spikes that live in the same window. Empty history → Infinity so the
+// detector never fires blind.
+function adaptiveThreshold(history, k) {
+  if (!history.length) return Infinity;
+  let mean = 0;
+  for (const v of history) mean += v;
+  mean /= history.length;
+  const med = median([...history].sort((a, b) => a - b));
+  const mad = median(history.map(v => Math.abs(v - med)).sort((a, b) => a - b));
+  return mean + k * mad;
+}
+
+// Onset state machine. `state` = { history, lastOnsetMs }. The incoming
+// flux is compared against the threshold of the *prior* history (a spike
+// must not lift its own threshold), then appended and trimmed to the
+// window. Fires only outside the refractory period. Pure: returns
+// { fired, state } without mutating the input.
+function stepOnset(state, flux, nowMs, opts = {}) {
+  const k = opts.k ?? 1.5;
+  const window = opts.window ?? 43;
+  const refractoryMs = opts.refractoryMs ?? 180;
+  const history = state?.history ?? [];
+  const lastOnsetMs = state?.lastOnsetMs ?? -Infinity;
+  const fired = flux > adaptiveThreshold(history, k)
+             && nowMs - lastOnsetMs >= refractoryMs;
+  const nextHistory = history.concat(flux).slice(-window);
+  return { fired, state: { history: nextHistory, lastOnsetMs: fired ? nowMs : lastOnsetMs } };
+}
+
+globalThis.__logic = { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset };
 })();
 </script>
 <script>
