@@ -140,3 +140,73 @@ test('interpret: bounds tightly contain every segment endpoint', () => {
   close(bounds.minY, minY, 'tight minY');
   close(bounds.maxY, maxY, 'tight maxY');
 });
+
+// ---------- slice 3 — validate + mutate ----------
+
+// deterministic LCG for mutation tests
+const makeRng = seed => () => {
+  seed = (seed * 1664525 + 1013904223) >>> 0;
+  return seed / 4294967296;
+};
+
+test('validate: accepts a well-formed system', () => {
+  const { validate } = loadLogic(HTML);
+  assert.equal(validate('X', { X: 'F[+X][-X]FX', F: 'FF' }, 5), null);
+});
+
+test('validate: rejects an empty axiom', () => {
+  const { validate } = loadLogic(HTML);
+  const err = validate('', { F: 'FF' }, 3);
+  assert.equal(typeof err, 'string');
+  assert.ok(err.length > 0);
+});
+
+test('validate: rejects unbalanced brackets in axiom or rules', () => {
+  const { validate } = loadLogic(HTML);
+  assert.equal(typeof validate('F[', {}, 1), 'string');
+  assert.equal(typeof validate('F', { F: 'F[+F' }, 2), 'string');
+  assert.equal(typeof validate('F', { F: 'F]F[' }, 2), 'string');
+});
+
+test('validate: rejects derivations that exceed the symbol budget', () => {
+  const { validate } = loadLogic(HTML);
+  const err = validate('F', { F: 'FF' }, 30, 60000);
+  assert.equal(typeof err, 'string');
+  // a comfortable system passes under the same budget
+  assert.equal(validate('F', { F: 'FF' }, 10, 60000), null);
+});
+
+test('mutate: returns rules that differ textually from the input', () => {
+  const { mutate } = loadLogic(HTML);
+  const rules = { X: 'F[+X][-X]FX', F: 'FF' };
+  for (let seed = 1; seed <= 50; seed++) {
+    const out = mutate(rules, makeRng(seed));
+    assert.notEqual(JSON.stringify(out), JSON.stringify(rules), `seed ${seed} must change something`);
+  }
+});
+
+test('mutate: does not mutate the input object', () => {
+  const { mutate } = loadLogic(HTML);
+  const rules = { F: 'F[+F]F[-F]F' };
+  const snapshot = JSON.stringify(rules);
+  mutate(rules, makeRng(7));
+  assert.equal(JSON.stringify(rules), snapshot);
+});
+
+test('mutate: mutated rules still expand and interpret without throwing', () => {
+  const { expand, interpret, mutate, validate } = loadLogic(HTML);
+  const rules = { X: 'F[+X][-X]FX', F: 'FF' };
+  for (let seed = 1; seed <= 50; seed++) {
+    const out = mutate(rules, makeRng(seed));
+    assert.equal(validate('X', out, 4), null, `seed ${seed} keeps brackets balanced`);
+    const s = expand('X', out, 4);
+    const { segments } = interpret(s, { angle: 22.5, step: 5 });
+    assert.ok(Number.isFinite(segments.length), `seed ${seed} interprets`);
+  }
+});
+
+test('mutate: is deterministic for a fixed rng seed', () => {
+  const { mutate } = loadLogic(HTML);
+  const rules = { X: 'F[+X][-X]FX', F: 'FF' };
+  assert.deepEqual(mutate(rules, makeRng(42)), mutate(rules, makeRng(42)));
+});
