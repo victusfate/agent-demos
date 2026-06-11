@@ -14,7 +14,38 @@
 // IIFE so only __logic reaches the shared global scope.
 (() => {
 
-globalThis.__logic = {};
+const SOFT2 = 4; // softening^2 (px^2): keeps close-pass forces finite
+
+// Net gravitational acceleration on `target` from every other body.
+function gravityAccel(target, bodies, G) {
+  let ax = 0, ay = 0;
+  for (const b of bodies) {
+    if (b === target) continue;
+    const dx = b.x - target.x, dy = b.y - target.y;
+    const r2 = dx * dx + dy * dy + SOFT2;
+    const inv = G * b.mass / (r2 * Math.sqrt(r2));
+    ax += dx * inv;
+    ay += dy * inv;
+  }
+  return { ax, ay };
+}
+
+// Semi-implicit Euler at fixed dt. Mutates the bodies' v/x in place and
+// returns the (possibly shorter) array. bodies[0] is the sun, fixed: true.
+function stepBodies(bodies, dt, G) {
+  const acc = bodies.map(b => b.fixed ? null : gravityAccel(b, bodies, G));
+  for (let i = 0; i < bodies.length; i++) {
+    const b = bodies[i];
+    if (b.fixed) continue;
+    b.vx += acc[i].ax * dt;
+    b.vy += acc[i].ay * dt;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+  }
+  return bodies;
+}
+
+globalThis.__logic = { gravityAccel, stepBodies };
 })();
 </script>
 </body>
