@@ -46,7 +46,15 @@ function fbm(noise, x, y, octaves) {
   return sum / norm;
 }
 
-globalThis.__logic = { makeNoise, fbm };
+// Curl of a scalar field: the perpendicular gradient (dn/dy, -dn/dx),
+// central differences. Divergence-free by construction — fake fluid.
+function curl(noiseFn, x, y, eps) {
+  const dndy = (noiseFn(x, y + eps) - noiseFn(x, y - eps)) / (2 * eps);
+  const dndx = (noiseFn(x + eps, y) - noiseFn(x - eps, y)) / (2 * eps);
+  return { vx: dndy, vy: -dndx };
+}
+
+globalThis.__logic = { makeNoise, fbm, curl };
 })();
 </script>
 </body>
