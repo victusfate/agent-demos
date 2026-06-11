@@ -98,3 +98,12 @@ test('PALETTES: six named palettes, each with valid petal and heart colors', () 
   }
   assert.equal(names.size, 6, 'palette names must be unique');
 });
+
+test('structure: logic block exports the full documented surface', () => {
+  const logic = loadLogic(HTML);
+  for (const fn of ['moonPhase', 'hexA', 'clamp', 'ease', 'pop', 'freq']) {
+    assert.equal(typeof logic[fn], 'function', `${fn} must be a function`);
+  }
+  assert.ok(Array.isArray(logic.SCALE), 'SCALE must be an array');
+  assert.ok(Array.isArray(logic.PALETTES), 'PALETTES must be an array');
+});
