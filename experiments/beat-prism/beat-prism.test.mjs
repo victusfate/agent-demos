@@ -152,6 +152,21 @@ test('estimateBpm: tolerates ±15 ms jitter on a 128 BPM train', () => {
   assert.ok(Math.abs(bpm - 128) <= 2, `expected ~128, got ${bpm}`);
 });
 
+// ---------- slice 4 — pulse decay ----------
+
+test('decayPulse: halves after one half-life, quarters after two', () => {
+  const { decayPulse } = loadLogic(HTML);
+  assert.ok(Math.abs(decayPulse(1, 150, 150) - 0.5) < 1e-12);
+  assert.ok(Math.abs(decayPulse(1, 300, 150) - 0.25) < 1e-12);
+});
+
+test('decayPulse: identity at dt 0 and linear in value', () => {
+  const { decayPulse } = loadLogic(HTML);
+  assert.equal(decayPulse(0.8, 0, 150), 0.8);
+  assert.ok(Math.abs(decayPulse(0.6, 150, 150) - 0.3) < 1e-12);
+  assert.equal(decayPulse(0, 999, 150), 0);
+});
+
 test('stepOnset: opts override k, window and refractoryMs', () => {
   const { stepOnset } = loadLogic(HTML);
   const fluxes = Array(40).fill(10);
