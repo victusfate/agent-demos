@@ -102,6 +102,73 @@ test('curl: field is non-trivial (some |v| > 0)', () => {
   assert.ok(maxMag > 0, 'curl field is identically zero');
 });
 
+// ---------- slice 3: particle step + palettes ----------
+
+const ink = (x, y, px = x, py = y) => ({ x, y, px, py, hue: 0, life: 1 });
+const STILL = { vx: 0, vy: 0 };
+
+test('stepParticle: pure — returns a new particle, input untouched', () => {
+  const { stepParticle } = loadLogic(HTML);
+  const p = ink(10, 20, 9, 19);
+  const snapshot = { ...p };
+  const q = stepParticle(p, STILL, 1 / 60, 0.9);
+  assert.notEqual(q, p, 'must return a new object');
+  assert.deepEqual(p, snapshot, 'input particle must not be mutated');
+});
+
+test('stepParticle: zero field + drag < 1 decays speed monotonically', () => {
+  const { stepParticle } = loadLogic(HTML);
+  let p = ink(0, 0, -2, -1); // implicit velocity (2, 1) per step
+  let speed = Math.hypot(p.x - p.px, p.y - p.py);
+  for (let i = 0; i < 50; i++) {
+    p = stepParticle(p, STILL, 1 / 60, 0.9);
+    const s = Math.hypot(p.x - p.px, p.y - p.py);
+    assert.ok(s < speed || s === 0, `speed did not decay at step ${i}: ${s} >= ${speed}`);
+    speed = s;
+  }
+  assert.ok(speed < 0.02, `speed should approach 0, got ${speed}`);
+});
+
+test('stepParticle: integrates the field velocity over dt', () => {
+  const { stepParticle } = loadLogic(HTML);
+  const p = ink(5, 5); // at rest
+  const q = stepParticle(p, { vx: 10, vy: -4 }, 0.1, 0.9);
+  assert.ok(Math.abs(q.x - 6) < 1e-9, `x ${q.x} != 6`);
+  assert.ok(Math.abs(q.y - 4.6) < 1e-9, `y ${q.y} != 4.6`);
+});
+
+test('stepParticle: px/py record the pre-step position', () => {
+  const { stepParticle } = loadLogic(HTML);
+  const p = ink(3, 7, 2, 6);
+  const q = stepParticle(p, { vx: 1, vy: 1 }, 0.016, 0.95);
+  assert.equal(q.px, 3);
+  assert.equal(q.py, 7);
+});
+
+test('stepParticle: preserves non-kinematic fields (hue, life)', () => {
+  const { stepParticle } = loadLogic(HTML);
+  const p = { ...ink(1, 1), hue: 4, life: 0.5 };
+  const q = stepParticle(p, STILL, 0.016, 0.9);
+  assert.equal(q.hue, 4);
+  assert.equal(q.life, 0.5);
+});
+
+test('PALETTES: six named ink palettes with valid hex colors', () => {
+  const { PALETTES } = loadLogic(HTML);
+  assert.equal(PALETTES.length, 6);
+  const hex = /^#[0-9a-f]{6}$/i;
+  const names = new Set();
+  for (const p of PALETTES) {
+    names.add(p.name);
+    assert.ok(p.inks.length >= 3, `${p.name} needs >=3 ink colors`);
+    for (const c of p.inks) assert.match(c, hex);
+  }
+  assert.equal(names.size, 6, 'palette names must be unique');
+  for (const expected of ['ember', 'orchid', 'lagoon']) {
+    assert.ok(names.has(expected), `missing nightbloom palette ${expected}`);
+  }
+});
+
 test('curl: matches the perpendicular gradient (dn/dy, -dn/dx)', () => {
   const { curl } = loadLogic(HTML);
   // analytic field n = x*y: dn/dy = x, dn/dx = y -> curl = (x, -y)
