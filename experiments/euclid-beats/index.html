@@ -35,7 +35,22 @@ function euclid(k, n) {
 
 const patternString = pattern => pattern.map(v => (v ? 'x' : '.')).join('');
 
-globalThis.__logic = { euclid, patternString };
+// Circular right-rotation by r steps (negative r rotates left).
+function rotate(pattern, r) {
+  const n = pattern.length;
+  if (n === 0) return [];
+  const s = ((r % n) + n) % n;
+  return pattern.map((_, i) => pattern[(i - s + n) % n]);
+}
+
+// Absolute hit times for one bar starting at t0.
+function scheduleTimes(pattern, stepDur, t0) {
+  const times = [];
+  pattern.forEach((hit, i) => { if (hit) times.push(t0 + i * stepDur); });
+  return times;
+}
+
+globalThis.__logic = { euclid, patternString, rotate, scheduleTimes };
 })();
 </script>
 <script>
