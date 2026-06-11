@@ -4,8 +4,97 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>harmonograph — a singing drawing machine</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #060505; }
+  canvas { display: block; }
+  #card {
+    position: fixed; left: 18px; bottom: 18px; z-index: 2;
+    font-family: Georgia, 'Times New Roman', serif; color: #e6ddc8;
+    background: rgba(14, 12, 9, 0.62); border: 1px solid rgba(235, 220, 185, 0.14);
+    border-radius: 10px; padding: 14px 16px 13px; max-width: 280px;
+    backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px);
+    box-shadow: 0 6px 28px rgba(0,0,0,0.45);
+  }
+  #card h1 {
+    font-size: 1.05rem; font-weight: normal; letter-spacing: .28em;
+    margin: 0 0 2px; color: #f2ead4;
+  }
+  #card .sub {
+    font-size: .68rem; letter-spacing: .12em; opacity: .55; margin: 0 0 10px;
+    font-style: italic;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 11px; }
+  .chip {
+    font-family: inherit; font-size: .72rem; letter-spacing: .06em;
+    color: #ddd2b8; background: transparent;
+    border: 1px solid rgba(235, 220, 185, 0.28); border-radius: 999px;
+    padding: 3px 10px 4px; cursor: pointer; transition: all .18s ease;
+  }
+  .chip:hover { border-color: rgba(245, 232, 200, 0.6); color: #fff6e2; }
+  .chip.active {
+    background: #ece1c4; color: #1c170f; border-color: #ece1c4;
+    text-shadow: none;
+  }
+  .row { display: flex; align-items: center; gap: 9px; margin: 7px 0; }
+  .row label {
+    font-size: .7rem; letter-spacing: .1em; opacity: .75; width: 58px;
+    flex: none;
+  }
+  .row output { font-size: .66rem; opacity: .5; width: 34px; text-align: right; flex: none; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; flex: 1; height: 2px;
+    background: rgba(235, 220, 185, 0.25); border-radius: 2px; outline: none;
+    cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 11px; height: 11px;
+    border-radius: 50%; background: #ece1c4; border: none;
+    box-shadow: 0 0 6px rgba(240, 225, 190, 0.7);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 11px; height: 11px; border-radius: 50%; background: #ece1c4;
+    border: none; box-shadow: 0 0 6px rgba(240, 225, 190, 0.7);
+  }
+  #swing {
+    font-family: inherit; font-size: .74rem; letter-spacing: .1em;
+    color: #1c170f; background: #d9cba4; border: none; border-radius: 6px;
+    padding: 6px 0; width: 100%; margin-top: 6px; cursor: pointer;
+    transition: background .18s ease;
+  }
+  #swing:hover { background: #f0e4c2; }
+  #hint {
+    position: fixed; bottom: 14px; right: 18px; pointer-events: none; z-index: 2;
+    font-family: Georgia, serif; font-size: .76rem; letter-spacing: .1em;
+    color: rgba(230, 216, 180, 0.42);
+  }
+  #toast {
+    position: fixed; top: 22px; left: 50%; transform: translateX(-50%); z-index: 2;
+    pointer-events: none; font-family: Georgia, serif; font-size: .9rem;
+    letter-spacing: .15em; color: rgba(240, 228, 198, 0.9);
+    text-shadow: 0 0 14px rgba(255, 235, 190, 0.55); opacity: 0; transition: opacity .6s ease;
+  }
+</style>
 </head>
 <body>
+<canvas id="c"></canvas>
+<div id="card">
+  <h1>harmonograph</h1>
+  <p class="sub">two pendulums, one pen — you can hear why it is pretty</p>
+  <div class="chips" id="chips"></div>
+  <div class="row">
+    <label for="phase">phase</label>
+    <input id="phase" type="range" min="0" max="6.2832" step="0.0001" value="1.5708">
+    <output id="phaseOut">90°</output>
+  </div>
+  <div class="row">
+    <label for="damping">damping</label>
+    <input id="damping" type="range" min="0" max="0.08" step="0.001" value="0.035">
+    <output id="dampOut">.035</output>
+  </div>
+  <button id="swing">new pendulum swing</button>
+</div>
+<div id="hint">[s]ave plate &nbsp; [m]ute &nbsp; [n]ew swing</div>
+<div id="toast"></div>
 
 <script id="logic">
 'use strict';
@@ -86,7 +175,285 @@ globalThis.__logic = { RATIOS, gcd, period, pendulumPoint, isClosed, makeParams,
 </script>
 <script>
 'use strict';
-// App shell — built out in slice 5.
+const { RATIOS, period, pendulumPoint, makeParams, mulberry32 } = globalThis.__logic;
+
+const TAU = Math.PI * 2;
+
+// ---------- draw constants ----------
+const SIM_SECONDS = 60;      // simulated pendulum time per plate
+const REAL_SECONDS = 15;     // wall-clock drawing time
+const TIME_SCALE = SIM_SECONDS / REAL_SECONDS;
+const SIM_DT = 0.004;        // integration/sampling step in simulated seconds
+const DRAW_BASE = 2.1;       // rad/s per ratio unit — sets how densely a plate winds
+const AUDIO_BASE = 110;      // Hz per ratio unit — fifth sings 220 & 330
+
+// ---------- canvases: an accumulating plate + a live composite ----------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const plate = document.createElement('canvas');
+const pctx = plate.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+// ---------- machine state ----------
+const state = {
+  ratio: RATIOS.find(r => r.name === 'fifth'),
+  phase: Math.PI / 2,
+  damping: 0.035,
+  seed: 19,
+  params: null,
+  simT: 0,
+  drawing: false,
+  prev: null,        // previous pen point (canvas coords)
+  penFade: 1,
+};
+
+function toCanvas(pt) {
+  const s = Math.min(W, H) * 0.42;
+  return { x: W / 2 + pt.x * s, y: H / 2 + pt.y * s };
+}
+
+// ink: ivory with a subtle hue shift along the figure's length
+function inkColor(simT, alpha) {
+  const hue = 44 + 20 * Math.sin(simT * 0.22) + 9 * Math.sin(simT * 0.052);
+  return `hsla(${hue}, 46%, 86%, ${alpha})`;
+}
+
+function buildParams() {
+  const params = makeParams(state.ratio,
+    { damping: state.damping, base: DRAW_BASE }, mulberry32(state.seed));
+  // the phase knob sets the lead pendulum's x/y phase relation directly —
+  // at unison, 90° draws a circle, 0° collapses to a line
+  params.yTerms[0].phi = (params.xTerms[0].phi + state.phase) % TAU;
+  return params;
+}
+
+function startDraw() {
+  state.params = buildParams();
+  state.simT = 0;
+  state.drawing = true;
+  state.penFade = 1;
+  state.prev = toCanvas(pendulumPoint(0, state.params));
+  pctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  pctx.clearRect(0, 0, W, H);
+  startDyad();
+}
+
+// ---------- layout ----------
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  for (const [cv, cx] of [[canvas, ctx], [plate, pctx]]) {
+    cv.width = W * DPR; cv.height = H * DPR;
+    cx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  if (state.params) startDraw();   // scale changed: redraw the plate
+}
+window.addEventListener('resize', resize);
+
+// ---------- audio: the dyad ----------
+// Two quiet near-sine voices at audio-scaled pendulum frequencies, decaying
+// with the ink (the gain ramp is the same exponential as the pen envelope).
+// A whisper of low-order harmonics is added so a detuned fifth ("drift")
+// beats audibly — pure sines share no partials at 2:3, so mistuning would
+// otherwise be inaudible. Consonant ratios fuse; drift shimmers at ~2 Hz.
+let AC = null, master = null, wave = null, voices = [];
+let muted = false, audioArmed = false;
+
+function audioInit() {
+  if (AC || !audioArmed) return;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  master = AC.createGain();
+  master.gain.value = muted ? 0 : 0.8;
+  master.connect(AC.destination);
+  const real = new Float32Array([0, 1, 0.16, 0.28, 0.06]);
+  const imag = new Float32Array(real.length);
+  wave = AC.createPeriodicWave(real, imag);
+}
+
+function stopDyad() {
+  for (const v of voices) {
+    try { v.gain.gain.cancelScheduledValues(AC.currentTime); } catch (e) {}
+    v.gain.gain.setTargetAtTime(0.0001, AC.currentTime, 0.08);
+    v.osc.stop(AC.currentTime + 0.6);
+  }
+  voices = [];
+}
+
+function startDyad() {
+  audioInit();
+  if (!AC) return;
+  if (AC.state === 'suspended') AC.resume();
+  stopDyad();
+  const { p, q, detune = 0 } = state.ratio;
+  const freqs = [AUDIO_BASE * p, AUDIO_BASE * (q + detune)];
+  const t0 = AC.currentTime + 0.02;
+  const VOL = 0.055;
+  // same exponential decay as the ink, mapped to real seconds
+  const end = Math.max(VOL * Math.exp(-state.damping * SIM_SECONDS), 0.0008);
+  for (const f of freqs) {
+    const osc = AC.createOscillator();
+    osc.setPeriodicWave(wave);
+    osc.frequency.value = f;
+    const gain = AC.createGain();
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(VOL, t0 + 0.15);
+    if (state.damping > 0) {
+      gain.gain.exponentialRampToValueAtTime(end, t0 + 0.15 + REAL_SECONDS);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.15 + REAL_SECONDS + 4);
+    } // damping 0: the chord sustains, like the figure
+    osc.connect(gain); gain.connect(master);
+    osc.start(t0);
+    if (state.damping > 0) osc.stop(t0 + 0.15 + REAL_SECONDS + 5);
+    voices.push({ osc, gain });
+  }
+}
+
+// ---------- controls ----------
+const chipsEl = document.getElementById('chips');
+for (const r of RATIOS) {
+  const b = document.createElement('button');
+  b.className = 'chip' + (r === state.ratio ? ' active' : '');
+  b.dataset.ratio = r.name;
+  b.textContent = r.name === 'drift' ? 'drift 2:3.01' : `${r.name} ${r.p}:${r.q}`;
+  b.addEventListener('click', () => {
+    state.ratio = r;
+    chipsEl.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c === b));
+    startDraw();
+  });
+  chipsEl.appendChild(b);
+}
+
+const phaseEl = document.getElementById('phase');
+const phaseOut = document.getElementById('phaseOut');
+phaseEl.addEventListener('input', () => {
+  state.phase = parseFloat(phaseEl.value);
+  phaseOut.textContent = Math.round(state.phase * 180 / Math.PI) + '°';
+  startDraw();
+});
+
+const dampEl = document.getElementById('damping');
+const dampOut = document.getElementById('dampOut');
+dampEl.addEventListener('input', () => {
+  state.damping = parseFloat(dampEl.value);
+  dampOut.textContent = state.damping === 0 ? '0' : state.damping.toFixed(3).slice(1);
+  startDraw();
+});
+
+function newSwing() {
+  state.seed = (state.seed * 1664525 + 1013904223) >>> 0;
+  startDraw();
+}
+document.getElementById('swing').addEventListener('click', newSwing);
+
+// browsers require a gesture before audio; arm on the first one anywhere
+window.addEventListener('pointerdown', () => {
+  if (audioArmed) return;
+  audioArmed = true;
+  audioInit();
+  if (state.drawing) startDyad();   // join the draw already in progress
+}, { capture: true });
+
+// ---------- toast & keys ----------
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.style.opacity = 0, 1800);
+}
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'm') {
+    muted = !muted;
+    if (master) master.gain.value = muted ? 0 : 0.8;
+    toast(muted ? 'muted' : 'sound on');
+  } else if (e.key === 's') {
+    const a = document.createElement('a');
+    a.download = 'harmonograph.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+    toast('plate saved');
+  } else if (e.key === 'n') {
+    newSwing();
+    toast('new swing');
+  }
+});
+
+// ---------- main loop ----------
+let last = 0;
+function frame(ms) {
+  const now = ms / 1000;
+  const dt = Math.min(0.05, now - last || 0.016);
+  last = now;
+
+  // advance the pen along the figure on the plate canvas
+  if (state.drawing) {
+    const target = Math.min(SIM_SECONDS, state.simT + dt * TIME_SCALE);
+    if (state.simT < target) {
+      pctx.lineCap = 'round';
+      pctx.lineJoin = 'round';
+      pctx.strokeStyle = inkColor(state.simT, 0.5);
+      pctx.lineWidth = 1.1;
+      pctx.shadowColor = inkColor(state.simT, 0.35);
+      pctx.shadowBlur = 2.5;
+      pctx.beginPath();
+      pctx.moveTo(state.prev.x, state.prev.y);
+      while (state.simT < target) {
+        state.simT = Math.min(target, state.simT + SIM_DT);
+        state.prev = toCanvas(pendulumPoint(state.simT, state.params));
+        pctx.lineTo(state.prev.x, state.prev.y);
+      }
+      pctx.stroke();
+      pctx.shadowBlur = 0;
+    }
+    if (state.simT >= SIM_SECONDS) state.drawing = false;  // hold the plate
+  } else if (state.penFade > 0) {
+    state.penFade = Math.max(0, state.penFade - dt / 1.8);
+  }
+
+  // composite: vignette background + plate + pen bead
+  const bg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.72);
+  bg.addColorStop(0, '#0d0b09');
+  bg.addColorStop(0.7, '#080606');
+  bg.addColorStop(1, '#040303');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(plate, 0, 0, W, H);
+
+  if (state.prev && state.penFade > 0) {
+    const { x, y } = state.prev;
+    const a = state.penFade;
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, 14);
+    glow.addColorStop(0, `rgba(255, 244, 214, ${0.34 * a})`);
+    glow.addColorStop(1, 'rgba(255, 244, 214, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(x - 14, y - 14, 28, 28);
+    ctx.fillStyle = `rgba(255, 250, 232, ${0.95 * a})`;
+    ctx.shadowColor = `rgba(255, 240, 200, ${0.9 * a})`;
+    ctx.shadowBlur = 9;
+    ctx.beginPath(); ctx.arc(x, y, 2.1, 0, TAU); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// debug/acceptance handle — read-only peek at the machine
+globalThis.__app = {
+  get ratioName() { return state.ratio.name; },
+  get simT() { return state.simT; },
+  get drawing() { return state.drawing; },
+  get seed() { return state.seed; },
+  get damping() { return state.damping; },
+  get muted() { return muted; },
+  get audioRunning() { return !!AC && AC.state === 'running' && voices.length > 0; },
+};
+
+resize();
+startDraw();
+requestAnimationFrame(frame);
 </script>
 </body>
 </html>
