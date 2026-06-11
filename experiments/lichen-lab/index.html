@@ -28,7 +28,10 @@
     color: rgba(170,190,255,.65); text-shadow: 0 0 12px rgba(120,160,255,.45);
     animation: breathe 2.6s ease-in-out infinite; transition: opacity .5s ease;
   }
-  #pausedHint.hidden { opacity: 0; animation: none; }
+  #pausedHint.hidden {
+    opacity: 0; animation: none; visibility: hidden;
+    transition: opacity .5s ease, visibility 0s .5s;
+  }
   @keyframes breathe { 0%,100% { opacity: .35; } 50% { opacity: .85; } }
 
   #hint {
