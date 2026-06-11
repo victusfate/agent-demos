@@ -65,3 +65,48 @@ test('fbm: deterministic for the same inputs', () => {
   const n = makeNoise(5);
   assert.equal(fbm(n, 1.5, 2.5, 4), fbm(n, 1.5, 2.5, 4));
 });
+
+// ---------- slice 2: curl field, divergence-free ----------
+
+test('curl: returns finite {vx, vy}', () => {
+  const { makeNoise, curl } = loadLogic(HTML);
+  const n = makeNoise(9);
+  for (const [x, y] of grid()) {
+    const v = curl(n, x, y, 0.01);
+    assert.ok(Number.isFinite(v.vx), `vx not finite at (${x},${y})`);
+    assert.ok(Number.isFinite(v.vy), `vy not finite at (${x},${y})`);
+  }
+});
+
+test('curl: numerical divergence is ~0 across sampled points', () => {
+  const { makeNoise, fbm, curl } = loadLogic(HTML);
+  const n = makeNoise(13);
+  const field = (x, y) => fbm(n, x, y, 3);
+  const eps = 0.01;
+  for (const [x, y] of grid(10, 5.9)) {
+    const xp = curl(field, x + eps, y, eps), xm = curl(field, x - eps, y, eps);
+    const yp = curl(field, x, y + eps, eps), ym = curl(field, x, y - eps, eps);
+    const div = (xp.vx - xm.vx) / (2 * eps) + (yp.vy - ym.vy) / (2 * eps);
+    assert.ok(Math.abs(div) < 1e-3, `divergence ${div} at (${x},${y})`);
+  }
+});
+
+test('curl: field is non-trivial (some |v| > 0)', () => {
+  const { makeNoise, curl } = loadLogic(HTML);
+  const n = makeNoise(21);
+  let maxMag = 0;
+  for (const [x, y] of grid()) {
+    const v = curl(n, x, y, 0.01);
+    maxMag = Math.max(maxMag, Math.hypot(v.vx, v.vy));
+  }
+  assert.ok(maxMag > 0, 'curl field is identically zero');
+});
+
+test('curl: matches the perpendicular gradient (dn/dy, -dn/dx)', () => {
+  const { curl } = loadLogic(HTML);
+  // analytic field n = x*y: dn/dy = x, dn/dx = y -> curl = (x, -y)
+  const n = (x, y) => x * y;
+  const v = curl(n, 2, 3, 0.001);
+  assert.ok(Math.abs(v.vx - 2) < 1e-6, `vx ${v.vx} != 2`);
+  assert.ok(Math.abs(v.vy + 3) < 1e-6, `vy ${v.vy} != -3`);
+});
