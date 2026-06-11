@@ -15,8 +15,10 @@
 #   bash scripts/fetch-test-video.sh --hq <url> full    # highest quality, whole video
 #   bash scripts/fetch-test-video.sh --res 2160 <url>   # best ≤2160p, highest fps
 #
-# --hq merges the best separate video+audio streams (4K/8K where offered)
-# instead of the best single-file mp4 (~720p on YouTube). Above 1080p
+# --hq merges the best separate video+audio streams instead of the best
+# single-file mp4 (~720p on YouTube). Downloads are capped at 2160p by
+# default (preferring higher fps, so 4K60 over 8K) — pass --res to change
+# the cap, or --res 0 to remove it entirely. Above 1080p
 # YouTube serves VP9/AV1, so the result is usually .webm/.mkv — fine for
 # Chrome/Edge. Seeing the full format ladder requires a JS runtime (deno
 # or node) plus yt-dlp's remotely-fetched EJS solver, which is opt-in;
@@ -34,7 +36,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT/videos"
 
 HQ=0
-RES=0
+RES=2160  # default height cap; --res overrides, --res 0 removes the cap
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --hq) HQ=1; shift ;;
