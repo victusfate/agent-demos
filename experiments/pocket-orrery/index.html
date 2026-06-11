@@ -252,6 +252,7 @@ function updateWinding(b) {
   const done = Math.floor(Math.abs(a.count));
   if (done > a.orbits) {
     a.orbits = done;
+    totalOrbits++;
     orbitNote(b);
     rings.push({ x: b.x, y: b.y, born: now, life: 0.7, maxR: b.radius * 5 + 12, hue: b.hue, width: 1.5 });
   }
@@ -495,7 +496,7 @@ function drawPlanet(b, t) {
 }
 
 // ---------- main loop ----------
-let now = 0, last = 0, phys = 0;
+let now = 0, last = 0, phys = 0, totalOrbits = 0;
 function frame(ms) {
   now = ms / 1000;
   const dt = clamp(now - last || 0.016, 0, 0.05);
@@ -547,6 +548,12 @@ function frame(ms) {
 
 resize();
 requestAnimationFrame(frame);
+
+// read-only debug handle for the headless acceptance run
+globalThis.__orrery = {
+  get bodies() { return bodies; },
+  get totalOrbits() { return totalOrbits; },
+};
 </script>
 </body>
 </html>
