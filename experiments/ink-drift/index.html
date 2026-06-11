@@ -54,7 +54,25 @@ function curl(noiseFn, x, y, eps) {
   return { vx: dndy, vy: -dndx };
 }
 
-globalThis.__logic = { makeNoise, fbm, curl };
+// Pure kinematic update (Verlet-style: implicit velocity is x - px).
+// Damps the carried motion by `drag` and adds the field velocity over dt.
+function stepParticle(p, vel, dt, drag) {
+  const ivx = (p.x - p.px) * drag + vel.vx * dt;
+  const ivy = (p.y - p.py) * drag + vel.vy * dt;
+  return { ...p, px: p.x, py: p.y, x: p.x + ivx, y: p.y + ivy };
+}
+
+// Inks lifted from the nightbloom palettes.
+const PALETTES = [
+  { name: 'ember',   inks: ['#ffb347', '#ff7e5f', '#ffd97a'] },
+  { name: 'orchid',  inks: ['#e96bff', '#b04cff', '#ff9de2'] },
+  { name: 'lagoon',  inks: ['#39e6c8', '#3fd0ff', '#8af5e2'] },
+  { name: 'frost',   inks: ['#9db8ff', '#cfe0ff', '#7e9bff'] },
+  { name: 'sunfall', inks: ['#ffd23f', '#ff9a3d', '#ffe98a'] },
+  { name: 'spirit',  inks: ['#b8ffd9', '#7df0b8', '#e4ffe9'] },
+];
+
+globalThis.__logic = { makeNoise, fbm, curl, stepParticle, PALETTES };
 })();
 </script>
 </body>
