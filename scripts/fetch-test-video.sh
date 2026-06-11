@@ -7,14 +7,21 @@
 # dropped onto the experiment page. Source videos can be feature-length, so
 # by default only a 3-minute sample is downloaded.
 #
-# Usage:   bash scripts/fetch-test-video.sh <url> [start] [duration|full]
+# Usage:   bash scripts/fetch-test-video.sh [--hq] <url> [start] [duration|full]
 #   bash scripts/fetch-test-video.sh <url>              # first 3 minutes
 #   bash scripts/fetch-test-video.sh <url> 45:00        # 3 min from 45:00
 #   bash scripts/fetch-test-video.sh <url> 45:00 5:00   # 5 min from 45:00
 #   bash scripts/fetch-test-video.sh <url> full         # entire video
+#   bash scripts/fetch-test-video.sh --hq <url> full    # highest quality, whole video
 #
-# Requires yt-dlp (pip install yt-dlp | brew install yt-dlp); sampling also
-# requires ffmpeg (yt-dlp uses it to cut the section).
+# --hq merges the best separate video+audio streams (4K/8K where offered)
+# instead of the best single-file mp4 (~720p on YouTube). Above 1080p
+# YouTube serves VP9/AV1, so the result is usually .webm/.mkv — fine for
+# Chrome/Edge. Note: without a JS runtime (deno) yt-dlp may not see the
+# very top formats.
+#
+# Requires yt-dlp (pip install yt-dlp | brew install yt-dlp); sampling and
+# --hq also require ffmpeg (section cutting / stream muxing).
 #
 # Output: prints the downloaded file path on stdout. ./videos/ is gitignored.
 # Idempotent: yt-dlp skips files it has already downloaded.
@@ -23,8 +30,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$ROOT/videos"
 
+HQ=0
+if [[ "${1:-}" == "--hq" ]]; then
+  HQ=1
+  shift
+fi
+
 if [[ $# -lt 1 || $# -gt 3 ]]; then
-  echo "usage: bash scripts/fetch-test-video.sh <url> [start] [duration|full]" >&2
+  echo "usage: bash scripts/fetch-test-video.sh [--hq] <url> [start] [duration|full]" >&2
   exit 2
 fi
 URL="$1"
@@ -34,6 +47,17 @@ DURATION="${3:-3:00}"
 if ! command -v yt-dlp >/dev/null 2>&1; then
   echo "error: yt-dlp not found. Install it: pip install yt-dlp (or brew install yt-dlp)" >&2
   exit 1
+fi
+
+# Best single-file mp4 plays anywhere without muxing; --hq merges the best
+# separate streams (needs ffmpeg) for the highest available resolution.
+FMT='b[ext=mp4]/b'
+if [[ $HQ -eq 1 ]]; then
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "error: ffmpeg not found (required by --hq to mux video+audio)." >&2
+    exit 1
+  fi
+  FMT='bv*+ba/b'
 fi
 
 # "1:23:45" / "23:45" / "45" -> seconds
@@ -57,11 +81,9 @@ fi
 
 mkdir -p "$OUT_DIR"
 
-# Prefer a single-file mp4 (plays in <video> without ffmpeg post-merging);
-# fall back to the best available single file.
 yt-dlp \
   --no-playlist \
-  -f 'b[ext=mp4]/b' \
+  -f "$FMT" \
   --print after_move:filepath \
   --no-simulate \
   "${EXTRA_ARGS[@]}" \
