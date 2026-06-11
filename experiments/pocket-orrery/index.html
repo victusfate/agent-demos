@@ -95,7 +95,26 @@ function stepBodies(bodies, dt, G, opts = {}) {
   return bodies;
 }
 
-globalThis.__logic = { gravityAccel, stepBodies, mergeBodies };
+// Winding accumulator in revolutions. Angles are atan2 outputs; the delta
+// is wrapped to (-π, π] so the ±π seam never registers as a near-full turn.
+// 2π of accumulated winding (count crossing an integer) = one orbit.
+function orbitCount(prevAngle, newAngle, count) {
+  let d = newAngle - prevAngle;
+  if (d > Math.PI) d -= 2 * Math.PI;
+  else if (d <= -Math.PI) d += 2 * Math.PI;
+  return count + d / (2 * Math.PI);
+}
+
+// Heavier → lower (or equal) degree of `scale` (ascending semitone offsets),
+// mapped logarithmically across the playable mass range.
+const NOTE_MASS_LO = 2, NOTE_MASS_HI = 4000;
+function noteForMass(mass, scale) {
+  const t = Math.log(mass / NOTE_MASS_LO) / Math.log(NOTE_MASS_HI / NOTE_MASS_LO);
+  const tt = Math.min(1, Math.max(0, t));
+  return scale[scale.length - 1 - Math.round(tt * (scale.length - 1))];
+}
+
+globalThis.__logic = { gravityAccel, stepBodies, mergeBodies, orbitCount, noteForMass };
 })();
 </script>
 </body>

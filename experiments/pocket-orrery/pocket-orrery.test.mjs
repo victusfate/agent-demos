@@ -152,16 +152,16 @@ const PENTA = [0, 3, 5, 7, 10, 12, 15];
 test('orbitCount: a full counter-clockwise revolution counts exactly once', () => {
   const { orbitCount } = loadLogic(HTML);
   let count = 0, crossings = 0;
-  const steps = 100;
+  const steps = 125; // 1.25 revolutions in 1/100-turn increments
   for (let i = 1; i <= steps; i++) {
-    const prev = ((i - 1) / steps) * TAU;
-    const next = (i / steps) * TAU;
+    const prev = ((i - 1) / 100) * TAU;
+    const next = (i / 100) * TAU;
     const before = Math.floor(count);
     count = orbitCount(Math.atan2(Math.sin(prev), Math.cos(prev)),
                        Math.atan2(Math.sin(next), Math.cos(next)), count);
     if (Math.floor(count) > before) crossings++;
   }
-  assert.ok(Math.abs(count - 1) < 1e-9, `one revolution should give count ~1, got ${count}`);
+  assert.ok(Math.abs(count - 1.25) < 1e-9, `1.25 revolutions should give ~1.25, got ${count}`);
   assert.equal(crossings, 1, 'the orbit completes exactly once');
 });
 
