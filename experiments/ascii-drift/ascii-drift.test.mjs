@@ -133,6 +133,61 @@ test('charFor: low h picks the low end of the ramp, high h the high end', () => 
   }
 });
 
+// ---------- slice 3 — region names ----------
+
+test('regionName: stable across calls and across fresh logic loads', () => {
+  const { regionName } = loadLogic(HTML);
+  const first = regionName(3, 7, 'sea');
+  assert.equal(typeof first, 'string');
+  assert.ok(first.length > 0);
+  for (let i = 0; i < 5; i++) assert.equal(regionName(3, 7, 'sea'), first);
+  const fresh = loadLogic(HTML);
+  assert.equal(fresh.regionName(3, 7, 'sea'), first, 'must be stable across loads');
+});
+
+test('regionName: sea blocks get a nautical suffix from the BIOMES table', () => {
+  const { regionName, BIOMES } = loadLogic(HTML);
+  for (const [bx, by] of [[3, 7], [0, 0], [-4, 12], [9, -2], [21, 34]]) {
+    const name = regionName(bx, by, 'sea');
+    assert.ok(
+      BIOMES['sea'].suffixes.some(s => name.endsWith(s)),
+      `"${name}" lacks a sea suffix (${BIOMES['sea'].suffixes.join(', ')})`
+    );
+  }
+});
+
+test('regionName: pronounceable — capitalized words, no 3+ consonant runs', () => {
+  const { regionName } = loadLogic(HTML);
+  const biomes = ['sea', 'plains', 'forest', 'mountains', 'snow'];
+  for (let i = 0; i < 40; i++) {
+    const name = regionName(i * 3 - 17, i * 5 + 2, biomes[i % biomes.length]);
+    for (const word of name.split(' ')) {
+      assert.match(word, /^[A-Z]/, `word "${word}" in "${name}" not capitalized`);
+    }
+    assert.ok(
+      !/[bcdfghjklmnpqrstvwxz]{3}/i.test(name.replace(/ /g, '|')),
+      `"${name}" has a 3+ consonant run`
+    );
+  }
+});
+
+test('regionName: distinct blocks give (mostly) distinct names', () => {
+  const { regionName } = loadLogic(HTML);
+  const names = new Set();
+  const N = 60;
+  for (let i = 0; i < N; i++) names.add(regionName(i % 10, Math.floor(i / 10), 'plains'));
+  assert.ok(names.size > N * 0.8, `only ${names.size}/${N} unique names`);
+});
+
+test('regionName: world seed changes the names', () => {
+  const { regionName } = loadLogic(HTML);
+  let diff = 0;
+  for (let i = 0; i < 20; i++) {
+    if (regionName(i, i * 2, 'forest', 111) !== regionName(i, i * 2, 'forest', 222)) diff++;
+  }
+  assert.ok(diff > 15, `seeds barely change names (${diff}/20 differ)`);
+});
+
 test('fbm: smooth — small step changes value by < 0.05', () => {
   const { makeNoise, fbm } = loadLogic(HTML);
   const noise = makeNoise(2026);
