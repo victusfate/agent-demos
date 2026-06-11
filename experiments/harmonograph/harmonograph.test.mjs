@@ -84,3 +84,33 @@ test('pendulumPoint: single-term envelope A·e^(−d·t) bounds |x| and is non-i
   const late = Math.abs(pendulumPoint(60 + Math.PI / (2 * f), params).x);
   assert.ok(late < A * 0.1, `expected strong decay by t≈60, got ${late}`);
 });
+
+// ---------- slice 3: closure ----------
+
+// Undamped 2:3 figure, phases chosen so y(0) = 0 — a position-only check at
+// t=0 would wrongly call this closed at T/2; periodicity at offsets won't.
+const undampedFifth = {
+  xTerms: [term(0.7, 2, 1.1), term(0.25, 3, 0.4)],
+  yTerms: [term(0.7, 3, 0), term(0.25, 2, 0)],
+};
+
+test('isClosed: undamped 2:3 closes at T = period(2:3)', () => {
+  const { isClosed, period } = loadLogic(HTML);
+  const T = period({ p: 2, q: 3 });
+  assert.equal(isClosed(undampedFifth, T, 1e-9), true);
+});
+
+test('isClosed: undamped 2:3 does not close at T/2 (even through its start point)', () => {
+  const { isClosed, period } = loadLogic(HTML);
+  const T = period({ p: 2, q: 3 });
+  assert.equal(isClosed(undampedFifth, T / 2, 1e-6), false);
+});
+
+test('isClosed: damping breaks closure at T', () => {
+  const { isClosed, period } = loadLogic(HTML);
+  const damped = {
+    xTerms: [term(0.7, 2, 1.1, 0.05), term(0.25, 3, 0.4, 0.05)],
+    yTerms: [term(0.7, 3, 0.6, 0.05), term(0.25, 2, 0.2, 0.05)],
+  };
+  assert.equal(isClosed(damped, period({ p: 2, q: 3 }), 1e-6), false);
+});
