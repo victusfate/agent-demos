@@ -64,3 +64,51 @@ test('clampSpeed: never returns a speed outside [min, max] across a sweep', () =
     assert.ok(m >= 1.5 - 1e-9 && m <= 6 + 1e-9, `speed ${m} escaped [1.5, 6]`);
   }
 });
+
+// ---------- slice 2 — the three rules ----------
+
+const boid = (x, y, vx = 0, vy = 0) => ({ x, y, vx, vy, hue: 190, wiggle: 0 });
+
+test('cohesion: steers toward the neighbor centroid', () => {
+  const { cohesion } = loadLogic(HTML);
+  const b = boid(0, 0);
+  const neighbors = [boid(10, 0), boid(10, 20), boid(40, 10)];
+  // centroid (20, 10) — steering must point into the +x +y quadrant
+  const s = cohesion(b, neighbors);
+  assert.ok(mag(s) > 0, 'must be nonzero');
+  assert.ok(dot(s, { x: 20, y: 10 }) > 0, 'must point toward centroid');
+  assert.ok(s.x > 0 && s.y > 0, 'must point into the centroid quadrant');
+});
+
+test('separation: steers away from a too-close neighbor', () => {
+  const { separation } = loadLogic(HTML);
+  const b = boid(0, 0);
+  const s = separation(b, [boid(3, 4)]); // close neighbor up-right
+  assert.ok(mag(s) > 0, 'must be nonzero');
+  assert.ok(dot(s, { x: -3, y: -4 }) > 0, 'must point away from the neighbor');
+});
+
+test('separation: a closer neighbor pushes harder than a distant one', () => {
+  const { separation } = loadLogic(HTML);
+  const b = boid(0, 0);
+  const near = separation(b, [boid(2, 0)]);
+  const far = separation(b, [boid(12, 0)]);
+  assert.ok(mag(near) > mag(far), 'separation must fall off with distance');
+});
+
+test('alignment: steering matches the average heading direction', () => {
+  const { alignment } = loadLogic(HTML);
+  const b = boid(0, 0, 0, -1); // heading up
+  const neighbors = [boid(5, 0, 2, 0), boid(-5, 0, 2, 0)]; // all heading +x
+  const s = alignment(b, neighbors);
+  assert.ok(mag(s) > 0, 'must be nonzero');
+  assert.ok(dot(s, { x: 1, y: 0 }) > 0, 'must steer toward the average heading');
+});
+
+test('the three rules all return {x:0, y:0} with no neighbors', () => {
+  const { separation, alignment, cohesion } = loadLogic(HTML);
+  const b = boid(7, 7, 1, 1);
+  for (const rule of [separation, alignment, cohesion]) {
+    assert.deepEqual(rule(b, []), { x: 0, y: 0 }, `${rule.name} must be zero`);
+  }
+});
