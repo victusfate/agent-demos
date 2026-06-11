@@ -67,6 +67,78 @@ test('generateMaze: different seeds produce different walls', () => {
   assert.notDeepEqual(Array.from(a.walls), Array.from(b.walls));
 });
 
+// ---------- slice 2: movement and solving ----------
+
+test('canMove: edge cells are blocked outward', () => {
+  const { generateMaze, canMove } = loadLogic(HTML);
+  const m = generateMaze(8, 6, 11);
+  for (let x = 0; x < m.w; x++) {
+    assert.equal(canMove(m, x, 'N'), false, `top row open north at x=${x}`);
+    assert.equal(canMove(m, (m.h - 1) * m.w + x, 'S'), false, `bottom row open south at x=${x}`);
+  }
+  for (let y = 0; y < m.h; y++) {
+    assert.equal(canMove(m, y * m.w, 'W'), false, `left col open west at y=${y}`);
+    assert.equal(canMove(m, y * m.w + m.w - 1, 'E'), false, `right col open east at y=${y}`);
+  }
+});
+
+test('canMove: wall symmetry — open N from a cell iff open S from its northern neighbor', () => {
+  const { generateMaze, canMove } = loadLogic(HTML);
+  const m = generateMaze(15, 11, 23);
+  for (let y = 1; y < m.h; y++) {
+    for (let x = 0; x < m.w; x++) {
+      const cell = y * m.w + x;
+      const north = cell - m.w;
+      assert.equal(canMove(m, cell, 'N'), canMove(m, north, 'S'), `asymmetric N/S at cell ${cell}`);
+    }
+  }
+  for (let y = 0; y < m.h; y++) {
+    for (let x = 1; x < m.w; x++) {
+      const cell = y * m.w + x;
+      const west = cell - 1;
+      assert.equal(canMove(m, cell, 'W'), canMove(m, west, 'E'), `asymmetric W/E at cell ${cell}`);
+    }
+  }
+});
+
+test('neighbors: returns exactly the open-adjacent cells', () => {
+  const { generateMaze, canMove, neighbors } = loadLogic(HTML);
+  const m = generateMaze(10, 7, 31);
+  for (let cell = 0; cell < m.w * m.h; cell++) {
+    const expected = [];
+    if (canMove(m, cell, 'N')) expected.push(cell - m.w);
+    if (canMove(m, cell, 'E')) expected.push(cell + 1);
+    if (canMove(m, cell, 'S')) expected.push(cell + m.w);
+    if (canMove(m, cell, 'W')) expected.push(cell - 1);
+    assert.deepEqual([...neighbors(m, cell)].sort((a, b) => a - b),
+      expected.sort((a, b) => a - b), `neighbor mismatch at cell ${cell}`);
+  }
+});
+
+test('solve: BFS from cell 0 reaches every cell (the maze is connected)', () => {
+  const { generateMaze, solve } = loadLogic(HTML);
+  const m = generateMaze(25, 17, 42);
+  for (const end of [m.w - 1, (m.h - 1) * m.w, m.w * m.h - 1, ((m.h / 2) | 0) * m.w + ((m.w / 2) | 0)]) {
+    const path = solve(m, 0, end);
+    assert.ok(Array.isArray(path) && path.length > 0, `no path 0 -> ${end}`);
+  }
+});
+
+test('solve: path starts/ends correctly, hops are open neighbors, no repeats', () => {
+  const { generateMaze, solve, neighbors } = loadLogic(HTML);
+  const m = generateMaze(25, 17, 7);
+  const start = 0, end = m.w * m.h - 1;
+  const path = solve(m, start, end);
+  assert.equal(path[0], start);
+  assert.equal(path[path.length - 1], end);
+  const seen = new Set(path);
+  assert.equal(seen.size, path.length, 'path revisits a cell');
+  for (let i = 1; i < path.length; i++) {
+    assert.ok(neighbors(m, path[i - 1]).includes(path[i]),
+      `hop ${path[i - 1]} -> ${path[i]} crosses a wall`);
+  }
+});
+
 test('generateMaze: carveOrder visits every cell, starting at cell 0', () => {
   const { generateMaze } = loadLogic(HTML);
   const m = generateMaze(10, 8, 5);
