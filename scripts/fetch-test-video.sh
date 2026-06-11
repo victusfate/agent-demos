@@ -87,7 +87,7 @@ if [[ "$START" != "full" ]]; then
   START_S="$(to_seconds "$START")"
   END_S="$(( START_S + $(to_seconds "$DURATION") ))"
   EXTRA_ARGS+=(--download-sections "*${START_S}-${END_S}" --force-keyframes-at-cuts
-               -o "$OUT_DIR/%(title)s [${START_S}s-${END_S}s].%(ext)s")
+               -o "$OUT_DIR/%(title)s_${START_S}s-${END_S}s.%(ext)s")
 else
   EXTRA_ARGS+=(-o "$OUT_DIR/%(title)s.%(ext)s")
 fi
@@ -96,6 +96,7 @@ mkdir -p "$OUT_DIR"
 
 yt-dlp \
   --no-playlist \
+  --restrict-filenames \
   --remote-components ejs:github \
   -f "$FMT" \
   "${SORT[@]}" \
