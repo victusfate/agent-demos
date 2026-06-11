@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>beat-prism — drop a video, get a music video</title>
+<style>
+  :root { --mag: #ff3df0; --cyn: #2ff0ff; --vio: #8f5bff; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+  #v { position: fixed; left: -9999px; top: 0; width: 8px; height: 8px; }
+
+  #ui {
+    position: fixed; inset: 0; z-index: 3; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; color: #e8f6ff; background: rgba(0,0,2,.45);
+    font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    transition: opacity 1.2s ease;
+  }
+  #ui.hidden { opacity: 0; pointer-events: none; }
+  #ui h1 {
+    font-size: 3rem; font-weight: normal; letter-spacing: .45em; margin: 0 0 1rem;
+    text-shadow: 0 0 18px var(--mag), 0 0 42px var(--mag), 2px 0 0 var(--cyn), -2px 0 0 var(--mag);
+  }
+  #ui p { margin: .3rem 0; letter-spacing: .14em; opacity: .8; font-size: .95rem;
+          text-shadow: 0 0 12px rgba(47,240,255,.7); }
+  #ui .keys { opacity: .45; font-size: .76rem; margin-top: 1.4rem; }
+
+  #hud {
+    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 2;
+    display: flex; align-items: center; gap: 14px; padding: 9px 16px;
+    font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    font-size: .78rem; color: #bfeaff; letter-spacing: .08em; white-space: nowrap;
+    background: rgba(4,2,12,.72); border: 1px solid rgba(143,91,255,.45);
+    border-radius: 12px; box-shadow: 0 0 24px rgba(143,91,255,.25), inset 0 0 18px rgba(47,240,255,.06);
+    backdrop-filter: blur(8px);
+  }
+  #hud .bpm-box { color: #fff; }
+  #bpm { display: inline-block; min-width: 3ch; text-align: right; color: var(--cyn);
+         text-shadow: 0 0 10px var(--cyn); font-size: .95rem; }
+  #sens { width: 90px; accent-color: var(--mag); }
+  .chip {
+    padding: 3px 9px; border-radius: 999px; cursor: pointer; user-select: none;
+    border: 1px solid rgba(160,180,210,.25); color: rgba(170,190,215,.45);
+    transition: all .15s ease;
+  }
+  .chip.on {
+    color: #eafcff; border-color: var(--cyn);
+    text-shadow: 0 0 8px var(--cyn); box-shadow: 0 0 10px rgba(47,240,255,.35), inset 0 0 8px rgba(47,240,255,.12);
+  }
+  #pick {
+    padding: 4px 12px; border-radius: 8px; cursor: pointer;
+    font: inherit; letter-spacing: inherit; color: #ffe3fc;
+    background: rgba(255,61,240,.12); border: 1px solid var(--mag);
+    text-shadow: 0 0 8px var(--mag); box-shadow: 0 0 12px rgba(255,61,240,.3);
+  }
+  #pick:hover { background: rgba(255,61,240,.25); }
+
+  #hint {
+    position: fixed; bottom: 16px; right: 18px; z-index: 2; pointer-events: none;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .7rem;
+    letter-spacing: .1em; color: rgba(150,180,220,.4);
+  }
+  #toast {
+    position: fixed; top: 22px; left: 50%; transform: translateX(-50%); z-index: 2;
+    pointer-events: none; font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: .85rem; letter-spacing: .15em; color: #eafcff;
+    text-shadow: 0 0 14px var(--cyn); opacity: 0; transition: opacity .5s ease;
+  }
+  #dropglow {
+    position: fixed; inset: 0; z-index: 4; pointer-events: none; opacity: 0;
+    border: 3px dashed var(--cyn); box-sizing: border-box;
+    box-shadow: inset 0 0 80px rgba(47,240,255,.35); transition: opacity .2s ease;
+  }
+  #dropglow.show { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline></video>
+<div id="ui">
+  <h1>beat-prism</h1>
+  <p>drop a video — or click to hear the demo</p>
+  <p>beats are detected live; effects fire on every hit</p>
+  <p class="keys">space play/pause &nbsp; d demo &nbsp; 1–6 effects &nbsp; s save png</p>
+</div>
+<div id="hud">
+  <span class="bpm-box">BPM <span id="bpm">—</span></span>
+  <label>sens <input id="sens" type="range" min="0" max="100" value="65"></label>
+  <span class="chip" data-fx="zoom">1 zoom</span>
+  <span class="chip" data-fx="flash">2 flash</span>
+  <span class="chip" data-fx="shake">3 shake</span>
+  <span class="chip" data-fx="particles">4 burst</span>
+  <span class="chip" data-fx="chroma">5 chroma</span>
+  <span class="chip" data-fx="glow">6 glow</span>
+  <button id="pick">load video</button>
+  <input id="file" type="file" accept="video/*" hidden>
+</div>
+<div id="hint">[space] play &nbsp; [d]emo &nbsp; [1-6] fx &nbsp; [s]ave</div>
+<div id="toast"></div>
+<div id="dropglow"></div>
+
+<script id="logic">
+'use strict';
+// Pure, DOM-free detection math — extracted and unit-tested in Node via
+// experiments/_harness/logic.mjs (see docs/beat-prism/plan.md).
+// IIFE so only __logic reaches the shared global scope.
+(() => {
+
+// Bass-weighted spectral flux: sum of positive per-bin differences between
+// consecutive magnitude spectra; bins below `bassBins` count twice (kick
+// and snare dominate perceived beat).
+function spectralFlux(prev, curr, bassBins) {
+  let sum = 0;
+  for (let i = 0; i < curr.length; i++) {
+    const d = curr[i] - (prev[i] ?? 0);
+    if (d > 0) sum += i < bassBins ? d * 2 : d;
+  }
+  return sum;
+}
+
+// Mean magnitude over bins [lo, hi) — hi exclusive, clamped; empty → 0.
+function bandEnergy(spectrum, lo, hi) {
+  const a = Math.max(0, lo | 0);
+  const b = Math.min(spectrum.length, hi | 0);
+  if (b <= a) return 0;
+  let sum = 0;
+  for (let i = a; i < b; i++) sum += spectrum[i];
+  return sum / (b - a);
+}
+
+const median = sorted => {
+  const n = sorted.length, m = n >> 1;
+  return n % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+};
+
+// Adaptive onset threshold: mean + k · MAD over the flux history window,
+// where MAD is the *median* absolute deviation — robust to the onset
+// spikes that live in the same window. Empty history → Infinity so the
+// detector never fires blind.
+function adaptiveThreshold(history, k) {
+  if (!history.length) return Infinity;
+  let mean = 0;
+  for (const v of history) mean += v;
+  mean /= history.length;
+  const med = median([...history].sort((a, b) => a - b));
+  const mad = median(history.map(v => Math.abs(v - med)).sort((a, b) => a - b));
+  return mean + k * mad;
+}
+
+// Onset state machine. `state` = { history, lastOnsetMs }. The incoming
+// flux is compared against the threshold of the *prior* history (a spike
+// must not lift its own threshold), then appended and trimmed to the
+// window. Fires only outside the refractory period. Pure: returns
+// { fired, state } without mutating the input.
+function stepOnset(state, flux, nowMs, opts = {}) {
+  const k = opts.k ?? 1.5;
+  const window = opts.window ?? 43;
+  const refractoryMs = opts.refractoryMs ?? 180;
+  const history = state?.history ?? [];
+  const lastOnsetMs = state?.lastOnsetMs ?? -Infinity;
+  const fired = flux > adaptiveThreshold(history, k)
+             && nowMs - lastOnsetMs >= refractoryMs;
+  const nextHistory = history.concat(flux).slice(-window);
+  return { fired, state: { history: nextHistory, lastOnsetMs: fired ? nowMs : lastOnsetMs } };
+}
+
+// Tempo from the inter-onset-interval histogram. Each IOI is folded by
+// octave into the [70, 180) BPM range and histogrammed in the *period*
+// domain (15 ms bins) — periods are linear in timing jitter, so the mean
+// of the modal bin's neighborhood stays unbiased where a BPM-domain mean
+// would skew sharp. Null until ≥ 8 onsets.
+function estimateBpm(onsetTimesMs) {
+  if (!onsetTimesMs || onsetTimesMs.length < 8) return null;
+  const MIN_P = 60000 / 180, MAX_P = 60000 / 70, BIN = 15;
+  const periods = [];
+  for (let i = 1; i < onsetTimesMs.length; i++) {
+    let p = onsetTimesMs[i] - onsetTimesMs[i - 1];
+    if (p <= 0) continue;
+    while (p < MIN_P) p *= 2;
+    while (p >= MAX_P) p /= 2;
+    periods.push(p);
+  }
+  if (!periods.length) return null;
+  const bins = new Map();
+  for (const p of periods) {
+    const bin = Math.round(p / BIN);
+    bins.set(bin, (bins.get(bin) ?? 0) + 1);
+  }
+  let mode = 0, best = -1;
+  for (const [bin, count] of bins) if (count > best) { best = count; mode = bin; }
+  const near = periods.filter(p => Math.abs(p - mode * BIN) <= BIN * 2);
+  return 60000 / (near.reduce((a, b) => a + b, 0) / near.length);
+}
+
+// Frame-rate-independent exponential decay for beat-triggered effect
+// pulses: the value halves every halfLifeMs.
+const decayPulse = (value, dtMs, halfLifeMs) => value * Math.pow(2, -dtMs / halfLifeMs);
+
+globalThis.__logic = { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse };
+})();
+</script>
+<script>
+'use strict';
+const { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse } =
+  globalThis.__logic;
+
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const rand = (a, b) => a + Math.random() * (b - a);
+
+// ---------- canvas (main + offscreen source) ----------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const src = document.createElement('canvas');     // the "source frame": video or demo scene
+const sctx = src.getContext('2d');
+let W = 0, H = 0;
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W; canvas.height = H;
+  src.width = W; src.height = H;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- state ----------
+const video = document.getElementById('v');
+video.loop = true;
+let mode = 'demo';            // 'demo' | 'video'
+let started = false;          // first user gesture happened
+let objectUrl = null;
+
+let AC = null, analyser = null, demoBus = null, mediaSrc = null, noiseBuf = null;
+let spectrum = null, prevSpec = null;
+
+let onsetState = { history: [], lastOnsetMs: -Infinity };
+let onsetTimes = [];
+let bpm = null;
+let bassS = 0, trebleS = 0;   // smoothed band energies, 0..1
+
+const fx = { zoom: true, flash: true, shake: true, particles: true, chroma: true, glow: true };
+const FX_ORDER = ['zoom', 'flash', 'shake', 'particles', 'chroma', 'glow'];
+const pulses = { zoom: 0, flash: 0, shake: 0 };
+const HALF_LIFE = { zoom: 140, flash: 90, shake: 110 };
+
+// ---------- audio graph ----------
+function audioInit() {
+  if (AC) return;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  analyser = AC.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0;   // smoothing would blur flux
+  analyser.connect(AC.destination);
+  demoBus = AC.createGain();
+  demoBus.gain.value = 0.9;
+  demoBus.connect(analyser);
+  spectrum = new Uint8Array(analyser.frequencyBinCount);
+  prevSpec = new Uint8Array(analyser.frequencyBinCount);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+
+const binOf = hz => AC ? Math.round(hz / (AC.sampleRate / 2048)) : 12;
+
+// ---------- demo mode: synthesized drum loop, through the same analyser ----------
+const DEMO_BPM = 124;
+let demoPlaying = false, demoTimer = null, demoStep = 0, demoNext = 0;
+
+function kick(t) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(150, t);
+  o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+  g.gain.setValueAtTime(0.001, t);
+  g.gain.exponentialRampToValueAtTime(1, t + 0.005);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
+  o.connect(g); g.connect(demoBus);
+  o.start(t); o.stop(t + 0.3);
+}
+function snare(t) {
+  const n = AC.createBufferSource(); n.buffer = noiseBuf;
+  const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.5, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+  n.connect(bp); bp.connect(g); g.connect(demoBus);
+  n.start(t); n.stop(t + 0.2);
+  const o = AC.createOscillator(); o.type = 'triangle'; o.frequency.value = 185;
+  const og = AC.createGain();
+  og.gain.setValueAtTime(0.25, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+  o.connect(og); og.connect(demoBus);
+  o.start(t); o.stop(t + 0.1);
+}
+function hat(t, vol) {
+  const n = AC.createBufferSource(); n.buffer = noiseBuf;
+  const hp = AC.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7200;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.045);
+  n.connect(hp); hp.connect(g); g.connect(demoBus);
+  n.start(t); n.stop(t + 0.06);
+}
+function scheduleDemo() {
+  if (!demoPlaying) return;
+  const stepDur = 60 / DEMO_BPM / 4;          // 16th notes
+  while (demoNext < AC.currentTime + 0.12) {  // 120 ms lookahead
+    const s = demoStep % 16;
+    if (s % 4 === 0) kick(demoNext);
+    if (s === 4 || s === 12) snare(demoNext);
+    if (s % 2 === 0) hat(demoNext, s % 4 === 2 ? 0.5 : 0.28);
+    demoStep++; demoNext += stepDur;
+  }
+}
+function startDemo() {
+  if (!AC || demoPlaying) return;
+  demoPlaying = true;
+  demoNext = AC.currentTime + 0.06;
+  demoTimer = setInterval(scheduleDemo, 30);
+}
+function stopDemo() {
+  demoPlaying = false;
+  clearInterval(demoTimer); demoTimer = null;
+}
+
+// ---------- video pipeline ----------
+function loadVideo(file) {
+  if (!file || !file.type.startsWith('video/')) { toast('that is not a video file'); return; }
+  begin();                          // drop / pick counts as the user gesture
+  stopDemo();
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(file);
+  if (!mediaSrc) {                  // created once per page life, then reused
+    mediaSrc = AC.createMediaElementSource(video);
+    mediaSrc.connect(analyser);
+  }
+  video.src = objectUrl;
+  mode = 'video';
+  resetDetector();
+  video.play().catch(() => toast('press space to play'));
+  toast(file.name);
+}
+video.addEventListener('error', () => { if (mode === 'video') toast('could not decode that video'); });
+
+function toDemo() {
+  if (mode === 'demo' && demoPlaying) return;
+  video.pause();
+  mode = 'demo';
+  resetDetector();
+  startDemo();
+  toast('demo loop');
+}
+
+function resetDetector() {
+  onsetState = { history: [], lastOnsetMs: -Infinity };
+  onsetTimes = [];
+  bpm = null;
+  if (prevSpec) prevSpec.fill(0);
+}
+
+// ---------- detection ----------
+const sensEl = document.getElementById('sens');
+const sensK = () => 3.2 - 2.6 * (sensEl.value / 100);  // slider scales the threshold
+
+function detect(nowMs) {
+  analyser.getByteFrequencyData(spectrum);
+  const playing = mode === 'demo' ? demoPlaying : !(video.paused || video.ended);
+  if (playing) {
+    const flux = spectralFlux(prevSpec, spectrum, binOf(250));
+    const r = stepOnset(onsetState, flux, nowMs, { k: sensK() });
+    onsetState = r.state;
+    if (r.fired) onOnset(nowMs);
+  }
+  prevSpec.set(spectrum);
+  const bass = bandEnergy(spectrum, 0, binOf(250)) / 255;
+  const treble = bandEnergy(spectrum, binOf(4000), binOf(12000)) / 255;
+  bassS += (bass - bassS) * 0.25;
+  trebleS += (treble - trebleS) * 0.25;
+}
+
+function onOnset(nowMs) {
+  pulses.zoom = pulses.flash = pulses.shake = 1;
+  if (fx.particles) burst();
+  onsetTimes.push(nowMs);
+  if (onsetTimes.length > 32) onsetTimes.shift();
+  bpm = estimateBpm(onsetTimes);
+}
+
+// ---------- particles ----------
+const particles = [];
+function burst() {
+  const n = Math.min(26, 400 - particles.length);
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, TAU), sp = rand(130, 430);
+    particles.push({
+      x: W / 2 + Math.cos(a) * rand(0, 40), y: H / 2 + Math.sin(a) * rand(0, 40),
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: rand(0.45, 1.1), age: 0, r: rand(1.2, 3),
+      hue: [305, 185, 262][(Math.random() * 3) | 0] + rand(-14, 14),
+    });
+  }
+}
+function drawParticles(dt) {
+  if (!particles.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.age += dt;
+    if (p.age >= p.life || !fx.particles) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.985; p.vy *= 0.985;
+    const f = 1 - p.age / p.life;
+    ctx.globalAlpha = f * 0.9;
+    ctx.fillStyle = `hsl(${p.hue} 100% 65%)`;
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (0.5 + f), 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ---------- source frame: video (letterboxed) or demo scene ----------
+function drawSource(t) {
+  sctx.fillStyle = '#000';
+  sctx.fillRect(0, 0, W, H);
+  if (mode === 'video' && video.readyState >= 2 && video.videoWidth) {
+    const sc = Math.min(W / video.videoWidth, H / video.videoHeight);
+    const dw = video.videoWidth * sc, dh = video.videoHeight * sc;
+    sctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  } else {
+    drawDemoScene(t);
+  }
+}
+
+// procedural stand-in visuals: radial spectrum bars + rotating prism wireframe
+function drawDemoScene(t) {
+  const cx = W / 2, cy = H / 2, m = Math.min(W, H);
+  const bg = sctx.createRadialGradient(cx, cy, 0, cx, cy, m * 0.75);
+  bg.addColorStop(0, '#0b0418');
+  bg.addColorStop(1, '#000');
+  sctx.fillStyle = bg;
+  sctx.fillRect(0, 0, W, H);
+
+  // radial spectrum bars
+  const N = 96, R = m * 0.26;
+  sctx.save();
+  sctx.lineWidth = 2;
+  sctx.lineCap = 'round';
+  for (let i = 0; i < N; i++) {
+    const v = spectrum ? spectrum[2 + Math.floor(Math.pow(i / N, 1.8) * 360)] / 255 : 0;
+    const a = (i / N) * TAU + t * 0.12;
+    const len = Math.pow(v, 1.4) * m * 0.22 + 2;
+    const hue = (i / N) * 360 + t * 24;
+    sctx.strokeStyle = `hsl(${hue} 100% 62% / 0.75)`;
+    sctx.beginPath();
+    sctx.moveTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    sctx.lineTo(cx + Math.cos(a) * (R + len), cy + Math.sin(a) * (R + len));
+    sctx.stroke();
+  }
+  sctx.restore();
+
+  // rotating triangular prism wireframe
+  const s = m * (0.13 + 0.05 * bassS + 0.04 * pulses.zoom);
+  const ry = t * 0.5, rx = 0.45 + Math.sin(t * 0.21) * 0.3;
+  const pts = [];
+  for (const z of [-0.62, 0.62]) {
+    for (let i = 0; i < 3; i++) {
+      const a = ry * 0.55 + i * TAU / 3;
+      let x = Math.cos(a), y = Math.sin(a) * 1.12, zz = z;
+      let y2 = y * Math.cos(rx) - zz * Math.sin(rx);
+      let z2 = y * Math.sin(rx) + zz * Math.cos(rx);
+      const x2 = x * Math.cos(ry) + z2 * Math.sin(ry);
+      const z3 = -x * Math.sin(ry) + z2 * Math.cos(ry);
+      const pr = 3 / (3 + z3);
+      pts.push([cx + x2 * pr * s, cy + y2 * pr * s]);
+    }
+  }
+  const edges = [[0,1],[1,2],[2,0],[3,4],[4,5],[5,3],[0,3],[1,4],[2,5]];
+  sctx.save();
+  const hue = (t * 40) % 360;
+  sctx.strokeStyle = `hsl(${hue} 100% 68%)`;
+  sctx.shadowColor = `hsl(${hue} 100% 60%)`;
+  sctx.shadowBlur = 16;
+  sctx.lineWidth = 1.6;
+  sctx.beginPath();
+  for (const [a, b] of edges) { sctx.moveTo(...pts[a]); sctx.lineTo(...pts[b]); }
+  sctx.stroke();
+  // glowing core follows the bass
+  const core = 3 + bassS * m * 0.03;
+  sctx.fillStyle = '#fff';
+  sctx.shadowBlur = 24;
+  sctx.beginPath(); sctx.arc(cx, cy, core, 0, TAU); sctx.fill();
+  sctx.restore();
+}
+
+// ---------- composite ----------
+function render(t, dt) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  if (fx.shake && pulses.shake > 0.02) {
+    const a = rand(0, TAU), d = pulses.shake * 13;
+    ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
+  }
+  if (fx.zoom && pulses.zoom > 0.02) {
+    const z = 1 + pulses.zoom * 0.07;
+    ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2);
+  }
+  ctx.drawImage(src, 0, 0);
+
+  // chromatic aberration follows the bass
+  const am = fx.chroma ? bassS * 30 : 0;
+  if (am > 0.6) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.32;
+    ctx.filter = 'hue-rotate(120deg) saturate(2.4)';
+    ctx.drawImage(src, am, 0);
+    ctx.filter = 'hue-rotate(240deg) saturate(2.4)';
+    ctx.drawImage(src, -am, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  if (fx.flash && pulses.flash > 0.02) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = pulses.flash * 0.38;
+    ctx.fillStyle = '#cfe9ff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  drawParticles(dt);
+
+  // edge glow follows the treble
+  if (fx.glow && trebleS > 0.015) {
+    ctx.save();
+    const hue = (t * 50) % 360;
+    ctx.globalAlpha = clamp(trebleS * 2.2, 0, 1);
+    ctx.strokeStyle = `hsl(${hue} 100% 64%)`;
+    ctx.shadowColor = `hsl(${hue} 100% 60%)`;
+    ctx.shadowBlur = 16 + trebleS * 70;
+    ctx.lineWidth = 2 + trebleS * 10;
+    ctx.strokeRect(4, 4, W - 8, H - 8);
+    ctx.restore();
+  }
+
+  for (const key of Object.keys(pulses)) {
+    pulses[key] = decayPulse(pulses[key], dt * 1000, HALF_LIFE[key]);
+  }
+}
+
+// ---------- HUD ----------
+const bpmEl = document.getElementById('bpm');
+const chips = [...document.querySelectorAll('.chip')];
+function syncChips() {
+  for (const c of chips) c.classList.toggle('on', fx[c.dataset.fx]);
+}
+function toggleFx(name) {
+  fx[name] = !fx[name];
+  syncChips();
+  toast(`${name} ${fx[name] ? 'on' : 'off'}`);
+}
+for (const c of chips) {
+  c.addEventListener('click', e => { e.stopPropagation(); toggleFx(c.dataset.fx); });
+}
+syncChips();
+
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.style.opacity = 0, 1800);
+}
+
+// ---------- input ----------
+const uiEl = document.getElementById('ui');
+function begin() {
+  audioInit();
+  if (AC && AC.state === 'suspended') AC.resume();
+  if (!started) {
+    started = true;
+    uiEl.classList.add('hidden');
+    if (mode === 'demo') startDemo();
+  }
+}
+uiEl.addEventListener('pointerdown', begin);
+canvas.addEventListener('pointerdown', begin);
+
+const fileEl = document.getElementById('file');
+document.getElementById('pick').addEventListener('click', () => fileEl.click());
+fileEl.addEventListener('change', () => { loadVideo(fileEl.files[0]); fileEl.value = ''; });
+
+const dropglow = document.getElementById('dropglow');
+window.addEventListener('dragover', e => { e.preventDefault(); dropglow.classList.add('show'); });
+window.addEventListener('dragleave', e => { if (!e.relatedTarget) dropglow.classList.remove('show'); });
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dropglow.classList.remove('show');
+  loadVideo(e.dataTransfer.files[0]);
+});
+
+window.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (!started) { begin(); return; }
+    if (mode === 'video') {
+      video.paused ? video.play() : video.pause();
+    } else {
+      demoPlaying ? stopDemo() : startDemo();
+    }
+  } else if (e.key === 'd') {
+    begin();
+    toDemo();
+  } else if (e.key === 's') {
+    const a = document.createElement('a');
+    a.download = 'beat-prism.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+    toast('frame saved');
+  } else if (e.key >= '1' && e.key <= '6') {
+    toggleFx(FX_ORDER[e.key - 1]);
+  }
+});
+
+// ---------- main loop ----------
+let last = 0;
+function frame(ms) {
+  const dt = Math.min(0.05, (ms - last) / 1000 || 0.016);
+  last = ms;
+  if (AC && analyser) detect(ms);
+  drawSource(ms / 1000);
+  render(ms / 1000, dt);
+  bpmEl.textContent = bpm === null ? '—' : Math.round(bpm);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

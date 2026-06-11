@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>constellation forge — a star chart with empty mythology</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #060a16; }
+  canvas { display: block; cursor: crosshair; }
+  #ui {
+    position: fixed; inset: 0; pointer-events: none;
+    font-family: Georgia, 'Times New Roman', serif; color: #e8dcb8;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; transition: opacity 2.2s ease;
+    text-shadow: 0 0 22px rgba(216,184,106,.45);
+  }
+  #ui h1 { font-size: 2.4rem; font-weight: normal; letter-spacing: .42em; margin: 0 0 .7rem; opacity: .9; }
+  #ui p { font-size: .95rem; letter-spacing: .14em; opacity: .6; margin: .22rem 0; font-style: italic; }
+  #ui.hidden { opacity: 0; }
+  #hint {
+    position: fixed; bottom: 12px; right: 16px; pointer-events: none;
+    font-family: Georgia, serif; font-size: .74rem; letter-spacing: .1em;
+    color: rgba(216,194,138,.4);
+  }
+  #toast {
+    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+    pointer-events: none; font-family: Georgia, serif; font-size: .88rem;
+    letter-spacing: .16em; color: rgba(232,220,184,.85); font-style: italic;
+    text-shadow: 0 0 14px rgba(216,184,106,.5); opacity: 0; transition: opacity .6s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>constellation forge</h1>
+  <p>a star chart with empty mythology</p>
+  <p>connect the stars &mdash; the forge will name what you drew</p>
+</div>
+<div id="hint">click stars to draw &nbsp;&middot;&nbsp; [enter] seal &nbsp;&middot;&nbsp; [esc] abandon &nbsp;&middot;&nbsp; [n]ew sky &nbsp;&middot;&nbsp; [s]ave</div>
+<div id="toast"></div>
+
+<script id="logic">
+'use strict';
+// Pure, DOM-free logic — extracted and unit-tested in Node via
+// experiments/_harness/logic.mjs (see docs/constellation-forge/plan.md).
+// IIFE so only __logic reaches the shared global scope.
+(() => {
+
+// mulberry32 — small, fast, seedable RNG; values in [0, 1).
+function mulberry(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Deterministic star field: n stars inside a small margin, mag in [0.2, 1].
+function makeSky(seed, w, h, n) {
+  const rng = mulberry(seed);
+  const mx = w * 0.03, my = h * 0.03;
+  const stars = [];
+  for (let i = 0; i < n; i++) {
+    stars.push({
+      x: mx + rng() * (w - 2 * mx),
+      y: my + rng() * (h - 2 * my),
+      mag: 0.2 + rng() * 0.8,
+    });
+  }
+  return stars;
+}
+
+// Index of the star nearest (x, y) within maxR, else -1.
+function nearestStar(stars, x, y, maxR) {
+  let best = -1, bestD = maxR * maxR;
+  for (let i = 0; i < stars.length; i++) {
+    const dx = stars[i].x - x, dy = stars[i].y - y;
+    const d = dx * dx + dy * dy;
+    if (d <= bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// Order-sensitive FNV-1a-style hash of the star-index sequence.
+function figureHash(indices) {
+  let h = 0x811c9dc5;
+  for (const idx of indices) {
+    h ^= (idx + 1) & 0xffff;
+    h = Math.imul(h, 0x01000193);
+    h ^= h >>> 13;
+  }
+  // fold in the length so prefixes differ
+  h ^= indices.length;
+  h = Math.imul(h, 0x01000193);
+  return h >>> 0;
+}
+
+// traits = { stars, closed, spanRatio } — figure → myth steering.
+function figureTraits(indices, stars, w, h) {
+  const closed = indices.length > 1 && indices[0] === indices[indices.length - 1];
+  const distinct = new Set(indices);
+  let span = 0;
+  const pts = [...distinct].map(i => stars[i]);
+  for (let i = 0; i < pts.length; i++) {
+    for (let j = i + 1; j < pts.length; j++) {
+      const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+      span = Math.max(span, Math.hypot(dx, dy));
+    }
+  }
+  return {
+    stars: distinct.size,
+    closed,
+    spanRatio: span / Math.hypot(w, h),
+  };
+}
+
+// ---------- the forge ----------
+
+const pickFrom = (rng, arr) => arr[(rng() * arr.length) | 0];
+
+// Syllable grammar: onset+vowel syllables, optional word-final coda.
+// Clusters never exceed two consonants, so names stay pronounceable.
+const ONSETS = ['b', 'c', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r',
+  's', 't', 'v', 'z', 'th', 'ph', 'ch', 'br', 'cr', 'dr', 'tr', 'pl', 'gl',
+  'st', 'sk', 'vr', 'rh', 'sm'];
+const VOWELS = ['a', 'e', 'i', 'o', 'u', 'a', 'e', 'o', 'a', 'i', 'e', 'o',
+  'ae', 'ia', 'ea', 'ei', 'y'];
+const CODAS = ['', '', '', 'n', 'r', 's', 'l', 'x', 'm', 'th', 'nd'];
+
+function forgeName(rng) {
+  for (;;) {
+    const roll = rng();
+    const syllables = roll < 0.4 ? 2 : roll < 0.9 ? 3 : 4;
+    let name = '';
+    let diphthongs = 0;
+    for (let i = 0; i < syllables; i++) {
+      name += pickFrom(rng, ONSETS);
+      let v = pickFrom(rng, VOWELS);
+      if (v.length > 1 && diphthongs++) v = v[0]; // at most one diphthong per name
+      name += v;
+    }
+    name += pickFrom(rng, CODAS);
+    if (name.length >= 4 && name.length <= 11) {
+      return name[0].toUpperCase() + name.slice(1);
+    }
+  }
+}
+
+const GREEK = ['α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ', 'ν'];
+const LATIN = ['Borealis', 'Australis', 'Occidua', 'Profunda', 'Antiqua',
+  'Serena', 'Obscura', 'Immortalis', 'Marina', 'Hiemalis'];
+
+// ---------- myth grammar ----------
+// Three solemn sentences: origin, trial, celestial reward. The figure's
+// traits choose the family; closed loops always forge crowns and rings.
+
+const HEROES = [
+  'a queen of the salt plains',
+  'the last oarsman of a drowned king',
+  'a blind cartographer of coasts no ship survived',
+  'the daughter of the winter tide',
+  'a smith who spoke only in iron',
+  'the watchman of a city now nameless',
+  'an astronomer who would not sleep',
+  'a weaver of funeral sails',
+  'the harpist of the low marshes',
+  'the lamplighter of the drowned quarter',
+  'a shepherd who counted no flock but the rain',
+  'the gravedigger who sang to the unburied',
+];
+
+const ORIGINS = [
+  'the tide forgets its salt',
+  'the mountains keep their oldest snow',
+  'no road remembers its makers',
+  'the reeds bow to a wind no one feels',
+  'the sea practices its grief on the rocks',
+];
+
+const VIRTUES = [
+  'kept faith with the silence',
+  'asked the night for nothing',
+  'owed the daylight no debts',
+  'spoke kindly to the things that drown',
+  'never once mistook a lantern for the dawn',
+];
+
+const BETRAYERS = [
+  'the king of the inland sea',
+  'a jealous god of small harvests',
+  'the first frost',
+  'a brother sworn at the same fire',
+  'the council of the seven harbors',
+];
+
+const SENTENCE_1 = [
+  (rng, name) => `In the elder dark, ${name} was ${pickFrom(rng, HEROES)}, and ${pickFrom(rng, VIRTUES)}.`,
+  (rng, name) => `Before any chart was drawn, ${name} was ${pickFrom(rng, HEROES)} in the country below these stars.`,
+  (rng, name) => `The old songs say ${name} was ${pickFrom(rng, HEROES)}, born where ${pickFrom(rng, ORIGINS)}.`,
+];
+
+const FAMILIES = {
+  crown: {
+    s2: [
+      (rng, name) => `When ${pickFrom(rng, BETRAYERS)} demanded tribute, ${name} refused, and bent the demand itself into a ring that no hand could break.`,
+      (rng, name) => `In the year of the long eclipse, ${pickFrom(rng, BETRAYERS)} stole the crown that ${name} had guarded, and the theft hollowed the kingdom like a winter.`,
+      (rng, name) => `For ${name} the smiths of heaven beat a circlet of cold gold, and the jealous earth found no brow worthy to wear it.`,
+    ],
+    s3: [
+      () => 'The heavens, who keep what the earth cannot, set the ring among the stars, where it closes still.',
+      (rng, name) => `Now the crown burns unworn above us, and ${name} is its only keeper.`,
+      () => 'Look up in the cold months and the circlet is there, complete, owing nothing to any throne.',
+    ],
+  },
+  river: {
+    s2: [
+      (rng, name) => `Grief carried ${name} farther than any road, until the sorrow itself wore down into a river.`,
+      (rng, name) => `${name} walked from the headwaters of one age to the estuary of another, naming every dark mile of the water.`,
+      (rng, name) => `When the flood took everything ${name} had loved, ${name} followed the water upstream to ask it why.`,
+    ],
+    s3: [
+      () => 'The heavens took up the river and laid it across the sky, so that no thirst would be forgotten.',
+      (rng, name) => `Its current runs there still, slow and bright, carrying the name of ${name} toward morning.`,
+      () => 'And the river remembers, as rivers do, every stone that ever told it no.',
+    ],
+  },
+  pursuit: {
+    s2: [
+      (rng, name) => `For ${pickFrom(rng, ['nine winters', 'a hundred seasons', 'the length of three lifetimes'])} ${name} pursued the ${pickFrom(rng, ['white stag of the ice fields', 'beast that cast no shadow', 'thief of the first fire'])} across ${pickFrom(rng, ['the salt flats and the burning meadows', 'kingdoms that fell as they passed', 'the floors of vanished seas'])}, never once breaking stride.`,
+      (rng, name) => `${name} hunted what could not be caught, and was in turn hunted by what could not be escaped, and neither would yield the road.`,
+    ],
+    s3: [
+      () => 'The chase never ended; the heavens, in mercy, made it endless instead, star following star forever.',
+      () => 'Neither hunter nor hunted ever tired, so the sky agreed to hold the hunt where every age could witness it.',
+    ],
+  },
+  vigil: {
+    s2: [
+      (rng, name) => `When ${pickFrom(rng, BETRAYERS)} broke the old oath, ${name} alone kept the watch, and the watch was long.`,
+      (rng, name) => `${name} was given ${pickFrom(rng, ['a lantern that burned seawater', 'the last seed of a felled orchard', 'an oath written in frost', 'the key to a door that no longer stood'])} and told to guard it, and guarded it past the end of the giving.`,
+    ],
+    s3: [
+      (rng, name) => `For that faith the heavens raised ${name} entire into the quiet of the stars.`,
+      () => 'The stars took the shape of that vigil, and keep it, as the faithful are kept.',
+    ],
+  },
+};
+
+const EPITHETS = {
+  crown: ['the Drowned Crown', 'the Ring of the Patient King', 'the Circlet Unworn',
+    'the Diadem of Frost', 'the Crown That Owes No Throne'],
+  river: ['the River of Names', 'the Long Water', 'the Current of Mourning',
+    'the Flood That Asked Why', 'the River Laid Across the Sky'],
+  pursuit: ['the Endless Hunt', 'the Long Pursuit', 'the Chase of the Shadowless Beast',
+    'the Hunter Unwearied', 'the Stride Unbroken'],
+  vigil: ['the Faithful Lantern', 'the Long Watch', 'the Keeper of the Last Seed',
+    'the Oath of Frost', 'the Oar of the Drowned King'],
+};
+
+function mythFamily(traits) {
+  if (traits.closed) return 'crown';
+  if (traits.spanRatio >= 0.5) return 'river';
+  if (traits.stars >= 7) return 'pursuit';
+  return 'vigil';
+}
+
+function forgeMyth(rng, traits, name) {
+  const who = name || forgeName(rng);
+  const family = FAMILIES[mythFamily(traits)];
+  const s1 = pickFrom(rng, SENTENCE_1)(rng, who);
+  const s2 = pickFrom(rng, family.s2)(rng, who);
+  const s3 = pickFrom(rng, family.s3)(rng, who);
+  return `${s1} ${s2} ${s3}`;
+}
+
+// Composite: one seed -> the whole engraving.
+function forgeLegend(seed, traits) {
+  const rng = mulberry(seed);
+  const name = forgeName(rng);
+  const designation = `${pickFrom(rng, GREEK)} ${name} ${pickFrom(rng, LATIN)}`;
+  const epithet = pickFrom(rng, EPITHETS[mythFamily(traits)]);
+  const myth = forgeMyth(rng, traits, name);
+  return { name, designation, epithet, myth };
+}
+
+globalThis.__logic = {
+  mulberry, makeSky, nearestStar, figureHash, figureTraits,
+  forgeName, forgeMyth, forgeLegend,
+};
+})();
+</script>
+<script>
+'use strict';
+const { mulberry, makeSky, nearestStar, figureHash, figureTraits, forgeLegend } =
+  globalThis.__logic;
+
+const TAU = Math.PI * 2;
+const GOLD = '#d8b86a';
+const goldA = a => `rgba(216,184,106,${a})`;
+const inkA = a => `rgba(42,34,22,${a})`;
+
+// ---------- canvas ----------
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+// ---------- sky state ----------
+const STAR_COUNT = 140;
+const SNAP = 26;
+let skySeed = 0;
+let stars = [];        // [{x, y, mag}]
+let figures = [];      // [{indices, legend, traits, sealedAt}]
+let thread = [];       // in-progress star indices
+let sweep = null;      // {figure, start, duration}
+let cardAlpha = 0;     // engraving card fade
+let plateNo = 1;       // sky counter for the chart title
+let hovered = -1;
+let mouse = { x: -1e4, y: -1e4 };
+let nebula = null;     // prerendered offscreen background
+
+function newSky(seed) {
+  skySeed = (seed ?? (Math.random() * 0x7fffffff)) >>> 0;
+  stars = makeSky(skySeed, W, H, STAR_COUNT);
+  figures = [];
+  thread = [];
+  sweep = null;
+  cardAlpha = 0;
+  renderNebula();
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (skySeed) {
+    stars = makeSky(skySeed, W, H, STAR_COUNT); // same seed, new bounds
+    renderNebula();
+  }
+}
+window.addEventListener('resize', resize);
+
+// ---------- prerendered nebula wash ----------
+function renderNebula() {
+  nebula = document.createElement('canvas');
+  nebula.width = W; nebula.height = H;
+  const nc = nebula.getContext('2d');
+  const rng = mulberry(skySeed ^ 0x5eed);
+  const tints = ['90,110,180', '170,130,90', '110,90,160', '80,130,150'];
+  for (let i = 0; i < 4; i++) {
+    const x = rng() * W, y = rng() * H, r = (0.25 + rng() * 0.4) * Math.max(W, H);
+    const g = nc.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(${tints[i]},${0.07 + rng() * 0.06})`);
+    g.addColorStop(1, `rgba(${tints[i]},0)`);
+    nc.fillStyle = g;
+    nc.fillRect(0, 0, W, H);
+  }
+  // faint dust
+  for (let i = 0; i < 340; i++) {
+    nc.globalAlpha = 0.04 + rng() * 0.06;
+    nc.fillStyle = '#cfd6ef';
+    nc.fillRect(rng() * W, rng() * H, 1, 1);
+  }
+  nc.globalAlpha = 1;
+}
+
+// ---------- geometry helpers ----------
+const starAt = i => stars[i];
+
+function pathLength(indices) {
+  let L = 0;
+  for (let i = 1; i < indices.length; i++) {
+    const a = starAt(indices[i - 1]), b = starAt(indices[i]);
+    L += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  return L;
+}
+
+function figureBox(indices) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const i of indices) {
+    const s = starAt(i);
+    x0 = Math.min(x0, s.x); y0 = Math.min(y0, s.y);
+    x1 = Math.max(x1, s.x); y1 = Math.max(y1, s.y);
+  }
+  return { x0, y0, x1, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+}
+
+// ---------- sealing ----------
+function seal() {
+  if (new Set(thread).size < 2) return;
+  const traits = figureTraits(thread, stars, W, H);
+  const legend = forgeLegend((skySeed ^ figureHash(thread)) >>> 0, traits);
+  const figure = { indices: [...thread], legend, traits, sealedAt: now };
+  figures.push(figure);
+  const dur = Math.min(2.6, 0.8 + pathLength(thread) / 700);
+  sweep = { figure, start: now, duration: dur };
+  cardAlpha = 0;
+  thread = [];
+}
+
+// ---------- input ----------
+let touched = false;
+function firstTouch() {
+  if (!touched) { touched = true; document.getElementById('ui').classList.add('hidden'); }
+}
+
+canvas.addEventListener('pointerdown', e => {
+  firstTouch();
+  const i = nearestStar(stars, e.clientX, e.clientY, SNAP);
+  if (i < 0) return;
+  const last = thread[thread.length - 1];
+  if (thread.length === 0) {
+    thread = [i];
+  } else if (i === last) {
+    seal();                                  // re-click last star: seal open figure
+  } else if (i === thread[0] && thread.length > 1) {
+    thread.push(i);                          // click first star: close the loop
+    seal();
+  } else {
+    thread.push(i);
+  }
+});
+
+canvas.addEventListener('pointermove', e => {
+  mouse = { x: e.clientX, y: e.clientY };
+  hovered = nearestStar(stars, e.clientX, e.clientY, SNAP);
+});
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { firstTouch(); seal(); }
+  else if (e.key === 'Escape') { thread = []; }
+  else if (e.key === 'n') { firstTouch(); plateNo++; newSky(); toast('a new sky, unnamed'); }
+  else if (e.key === 's') {
+    const a = document.createElement('a');
+    a.download = 'constellation-forge.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+    toast('the plate is kept');
+  }
+});
+
+// ---------- toast ----------
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.style.opacity = 1;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.style.opacity = 0, 2000);
+}
+
+// ---------- drawing ----------
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#04060f');
+  sky.addColorStop(0.5, '#0a1024');
+  sky.addColorStop(1, '#070b1a');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+  if (nebula) ctx.drawImage(nebula, 0, 0);
+  // vignette
+  const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+  v.addColorStop(0, 'rgba(0,0,0,0)');
+  v.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawFrame() {
+  ctx.save();
+  ctx.strokeStyle = goldA(0.28);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(14.5, 14.5, W - 29, H - 29);
+  ctx.strokeStyle = goldA(0.14);
+  ctx.strokeRect(19.5, 19.5, W - 39, H - 39);
+  // title plate
+  const title = 'TABVLA · CÆLI · NOVA';
+  ctx.font = '11px Georgia, serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = goldA(0.5);
+  const tw = ctx.measureText(title).width;
+  ctx.fillStyle = '#0a1024';
+  ctx.fillRect(W / 2 - tw / 2 - 16, 8, tw + 32, 14);
+  ctx.fillStyle = goldA(0.55);
+  ctx.fillText(title, W / 2, 19);
+  ctx.fillStyle = goldA(0.35);
+  ctx.font = 'italic 10px Georgia, serif';
+  ctx.fillText(`plate ${['i','ii','iii','iv','v','vi','vii','viii','ix','x'][(plateNo - 1) % 10]} · seed ${skySeed % 10000}`, W / 2, H - 22);
+  ctx.restore();
+}
+
+function drawStars(t) {
+  for (let i = 0; i < stars.length; i++) {
+    const s = stars[i];
+    const tw = 0.55 + 0.45 * Math.sin(t * (0.6 + (i % 7) * 0.22) + i * 2.399);
+    const r = 0.65 + s.mag * 1.9;
+    const a = (0.3 + s.mag * 0.6) * (0.7 + 0.3 * tw);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#e9ecf7';
+    ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, TAU); ctx.fill();
+    if (s.mag > 0.82) {                          // diffraction glints on bright stars
+      ctx.globalAlpha = a * 0.45;
+      ctx.strokeStyle = '#e9ecf7';
+      ctx.lineWidth = 0.6;
+      const g = r * (3 + tw * 1.5);
+      ctx.beginPath();
+      ctx.moveTo(s.x - g, s.y); ctx.lineTo(s.x + g, s.y);
+      ctx.moveTo(s.x, s.y - g); ctx.lineTo(s.x, s.y + g);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+  if (hovered >= 0) {
+    const s = starAt(hovered);
+    ctx.strokeStyle = goldA(0.55);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(s.x, s.y, 7, 0, TAU); ctx.stroke();
+  }
+}
+
+function strokePath(indices, upTo = Infinity) {
+  ctx.beginPath();
+  let remaining = upTo;
+  for (let i = 0; i < indices.length; i++) {
+    const s = starAt(indices[i]);
+    if (i === 0) { ctx.moveTo(s.x, s.y); continue; }
+    const p = starAt(indices[i - 1]);
+    const segLen = Math.hypot(s.x - p.x, s.y - p.y);
+    if (segLen <= remaining) {
+      ctx.lineTo(s.x, s.y);
+      remaining -= segLen;
+    } else {
+      const f = remaining / segLen;
+      ctx.lineTo(p.x + (s.x - p.x) * f, p.y + (s.y - p.y) * f);
+      ctx.stroke();
+      return { x: p.x + (s.x - p.x) * f, y: p.y + (s.y - p.y) * f };
+    }
+  }
+  ctx.stroke();
+  return null;
+}
+
+function drawFigures(t) {
+  for (const fig of figures) {
+    const sweeping = sweep && sweep.figure === fig;
+    const since = t - fig.sealedAt;
+    // engraved chart line: brightens with the sweep, settles to faded gold
+    const settle = Math.min(1, Math.max(0, (since - (sweeping ? 1e9 : 0)) / 1.4));
+    const alpha = sweeping ? 0.16 : 0.5 - 0.12 * settle;
+    ctx.save();
+    ctx.strokeStyle = goldA(alpha);
+    ctx.lineWidth = 1.2;
+    ctx.shadowColor = goldA(0.5);
+    ctx.shadowBlur = sweeping ? 2 : 5;
+    strokePath(fig.indices);
+    ctx.restore();
+
+    if (sweeping) {
+      const p = Math.min(1, (t - sweep.start) / sweep.duration);
+      const eased = 1 - Math.pow(1 - p, 2.2);
+      const L = pathLength(fig.indices);
+      ctx.save();
+      ctx.strokeStyle = goldA(0.9);
+      ctx.lineWidth = 1.6;
+      ctx.shadowColor = goldA(0.95);
+      ctx.shadowBlur = 12;
+      const head = strokePath(fig.indices, eased * L);
+      if (head) {                                // luminous sweep head
+        const halo = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, 26);
+        halo.addColorStop(0, goldA(0.5));
+        halo.addColorStop(1, goldA(0));
+        ctx.fillStyle = halo;
+        ctx.fillRect(head.x - 26, head.y - 26, 52, 52);
+        ctx.fillStyle = '#fff4d8';
+        ctx.beginPath(); ctx.arc(head.x, head.y, 2.2, 0, TAU); ctx.fill();
+      }
+      ctx.restore();
+      if (p >= 1) sweep = null;
+    }
+
+    // marked stars
+    for (const i of new Set(fig.indices)) {
+      const s = starAt(i);
+      ctx.fillStyle = goldA(0.85);
+      ctx.beginPath(); ctx.arc(s.x, s.y, 1.6, 0, TAU); ctx.fill();
+    }
+
+    // name label, once the sweep is done
+    if (!sweeping) {
+      const labelAge = since - (sweep && sweep.figure === fig ? 1e9 : 0.4);
+      const la = Math.min(1, Math.max(0, labelAge / 1.2));
+      if (la > 0) {
+        const box = figureBox(fig.indices);
+        const ly = Math.max(46, box.y0 - 16);
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.globalAlpha = la;
+        ctx.fillStyle = goldA(0.8);
+        ctx.font = 'small-caps 13px Georgia, serif';
+        ctx.shadowColor = 'rgba(0,0,0,0.8)';
+        ctx.shadowBlur = 4;
+        ctx.fillText(fig.legend.name, box.cx, ly);
+        ctx.fillStyle = goldA(0.5);
+        ctx.font = 'italic 10px Georgia, serif';
+        ctx.fillText(fig.legend.designation, box.cx, ly + 13);
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function drawThread(t) {
+  if (thread.length === 0) return;
+  ctx.save();
+  ctx.strokeStyle = goldA(0.75);
+  ctx.lineWidth = 1.4;
+  ctx.shadowColor = goldA(0.8);
+  ctx.shadowBlur = 7;
+  strokePath(thread);
+  ctx.restore();
+  // ghost line to cursor
+  const last = starAt(thread[thread.length - 1]);
+  if (mouse.x > -1e3) {
+    ctx.save();
+    ctx.strokeStyle = goldA(0.22);
+    ctx.setLineDash([3, 5]);
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(mouse.x, mouse.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+  // pulsing terminus
+  const pulse = 4.5 + Math.sin(t * 4) * 1.6;
+  ctx.strokeStyle = goldA(0.8);
+  ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(last.x, last.y, pulse, 0, TAU); ctx.stroke();
+  // chosen stars
+  for (const i of thread) {
+    const s = starAt(i);
+    ctx.fillStyle = '#ffe9b0';
+    ctx.beginPath(); ctx.arc(s.x, s.y, 2, 0, TAU); ctx.fill();
+  }
+  // first star marked as the loop's gate
+  if (thread.length > 1) {
+    const s0 = starAt(thread[0]);
+    ctx.strokeStyle = goldA(0.4);
+    ctx.beginPath(); ctx.arc(s0.x, s0.y, 8, 0, TAU); ctx.stroke();
+  }
+}
+
+// ---------- the engraving card (museum label) ----------
+function wrapText(text, maxWidth, font) {
+  ctx.font = font;
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const probe = line ? line + ' ' + w : w;
+    if (ctx.measureText(probe).width > maxWidth && line) {
+      lines.push(line); line = w;
+    } else line = probe;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawCard(t) {
+  const fig = figures[figures.length - 1];
+  if (!fig) { cardAlpha = 0; return; }
+  if (sweep && sweep.figure === fig) return;     // wait for the sweep to finish
+  cardAlpha = Math.min(1, cardAlpha + 0.02);
+  if (cardAlpha <= 0) return;
+
+  const { name, designation, myth, epithet } = fig.legend;
+  const cw = Math.min(360, W - 64);
+  const pad = 18;
+  const mythFont = '12.5px Georgia, serif';
+  const lines = wrapText(myth, cw - pad * 2, mythFont);
+  const lineH = 17;
+  const headH = 58;
+  const ch = headH + lines.length * lineH + pad + 6;
+  const cx = 32, cy = H - ch - 32;
+
+  ctx.save();
+  ctx.globalAlpha = cardAlpha * 0.97;
+  // parchment
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = '#e9dfc6';
+  ctx.fillRect(cx, cy, cw, ch);
+  ctx.shadowBlur = 0;
+  const grain = ctx.createLinearGradient(cx, cy, cx + cw, cy + ch);
+  grain.addColorStop(0, 'rgba(160,130,80,0.10)');
+  grain.addColorStop(0.5, 'rgba(160,130,80,0)');
+  grain.addColorStop(1, 'rgba(120,95,60,0.12)');
+  ctx.fillStyle = grain;
+  ctx.fillRect(cx, cy, cw, ch);
+  // double rule border
+  ctx.strokeStyle = inkA(0.55);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(cx + 6.5, cy + 6.5, cw - 13, ch - 13);
+  ctx.strokeStyle = inkA(0.25);
+  ctx.strokeRect(cx + 9.5, cy + 9.5, cw - 19, ch - 19);
+  // header
+  ctx.textAlign = 'center';
+  ctx.fillStyle = inkA(0.95);
+  ctx.font = 'small-caps 19px Georgia, serif';
+  ctx.fillText(`${name} — ${epithet}`, cx + cw / 2, cy + 30);
+  ctx.fillStyle = inkA(0.6);
+  ctx.font = 'italic 11.5px Georgia, serif';
+  ctx.fillText(designation, cx + cw / 2, cy + 47);
+  // rule
+  ctx.strokeStyle = inkA(0.4);
+  ctx.beginPath();
+  ctx.moveTo(cx + cw / 2 - 28, cy + 55.5); ctx.lineTo(cx + cw / 2 + 28, cy + 55.5);
+  ctx.stroke();
+  // myth
+  ctx.fillStyle = inkA(0.85);
+  ctx.font = mythFont;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], cx + cw / 2, cy + headH + 12 + i * lineH);
+  }
+  ctx.restore();
+}
+
+// ---------- main loop ----------
+let now = 0;
+function frame(ms) {
+  now = ms / 1000;
+  drawBackground();
+  drawStars(now);
+  drawFigures(now);
+  drawThread(now);
+  drawFrame();
+  drawCard(now);
+  requestAnimationFrame(frame);
+}
+
+// ---------- boot ----------
+resize();
+const urlSeed = parseInt(new URLSearchParams(location.search).get('seed'), 10);
+newSky(Number.isFinite(urlSeed) ? urlSeed : undefined);
+requestAnimationFrame(frame);
+
+// Debug/acceptance handle (read-only views of live state).
+globalThis.__state = {
+  get seed() { return skySeed; },
+  get stars() { return stars; },
+  get figures() { return figures; },
+  get thread() { return thread; },
+  get cardAlpha() { return cardAlpha; },
+};
+</script>
+</body>
+</html>
