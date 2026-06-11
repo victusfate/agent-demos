@@ -327,6 +327,25 @@ function stepGrid(grid, onsetMs, bpm, nowMs, opts = {}) {
   return g;
 }
 
+// Beat/bar boundaries the confident grid crossed in the half-open
+// window (prevMs, nowMs] — the render loop calls this once per frame
+// and fires pulse effects on the returned events. Pure.
+function gridEvents(grid, prevMs, nowMs) {
+  if (!grid?.confident || grid.anchorMs === null || grid.periodMs === null
+      || !(nowMs > prevMs)) return [];
+  const { anchorMs, periodMs, beatBase } = grid;
+  const events = [];
+  const jFirst = Math.floor((prevMs - anchorMs) / periodMs) + 1;
+  for (let j = jFirst; anchorMs + j * periodMs <= nowMs; j++) {
+    const timeMs = anchorMs + j * periodMs;
+    if (timeMs <= prevMs) continue;     // float-edge guard at the window start
+    const beatIndex = beatBase + j;
+    events.push({ timeMs, beatIndex, isBar: beatIndex % 4 === 0,
+                  barIndex: Math.floor(beatIndex / 4) });
+  }
+  return events;
+}
+
 // Per-strip pixel offsets for slice-glitch / v-slice, in [-max, max].
 function sliceOffsets(seed, count, maxOffset) {
   const rng = mulberry32(seed);
@@ -348,7 +367,7 @@ const ringIndex = (head, back, size) => (((head - back) % size) + size) % size;
 
 globalThis.__logic = {
   spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
-  FX_REGISTRY, mulberry32, latencyMs, stepGrid, sliceOffsets, wedgeAngles, posterizeCurve, ringIndex,
+  FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, sliceOffsets, wedgeAngles, posterizeCurve, ringIndex,
 };
 })();
 </script>
