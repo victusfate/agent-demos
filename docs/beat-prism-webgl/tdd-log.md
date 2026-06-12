@@ -72,3 +72,17 @@
   pass, glow-sprite spectrum bars, prism wireframe via gl.LINES into the
   srcT target). drawSource/drawDemoScene joined the dead 2D code for
   slice 9 deletion. 116 green.
+
+## Slice 9 — 2D pipeline removal + save-png
+- Status: done
+- Notes: 548 lines of dead Canvas2D pipeline deleted (render/drawBase/
+  draw* fns, offscreen buffers, scanline tile); only noise + atlas
+  generation still touch a 2D canvas. `s` redraws the last pass plan
+  before toDataURL (GL back buffer unpreserved). 118 green, 323 repo.
+
+## Code-quality review (auto-fix)
+- glOk unused binding dropped; passLive if-chain → LIVE_OVERRIDES map
+  (mirrors SOLO_UNIFORMS); FX_INDEX map replaces per-call registry find.
+- File is 2,127 lines — over the 1,000 guidance but the single-file
+  experiment constraint is a recorded design decision; accepted.
+- 323 green after fixes.

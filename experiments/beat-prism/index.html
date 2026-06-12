@@ -492,21 +492,28 @@ const COLOR_FOLD = ['hue-spin', 'sat-pump', 'bleach-burn', 'gamma-flicker',
 const OVERLAY_FOLD = ['glow', 'scanlines', 'vhs-band', 'grain-burst',
                       'vignette-pump', 'letterbox-snap', 'starburst', 'shockwave'];
 
+const FX_INDEX = new Map(FX_REGISTRY.map(e => [e.id, e]));
+
+// Per-effect liveness overrides — effects whose gating differs from their
+// kind's default: chroma is energy-driven (below ~half a pixel of split,
+// bass·30 ≤ 0.6, the pass isn't worth dispatching); freeze-frame only
+// manifests as the frozen collapse; stutter needs ring depth; strobe
+// keeps its even-frame parity.
+const LIVE_OVERRIDES = {
+  chroma: input => input.bass * 30 > 0.6,
+  'freeze-frame': () => false,
+  'stutter-loop': input => (input.pulses['stutter-loop'] ?? 0) > 0.2
+                        && (input.scheduled?.stutterBack ?? 0) >= 1,
+  'strobe-black': input => (input.pulses['strobe-black'] ?? 0) > 0.25
+                        && (input.frameNo ?? 0) % 2 === 0,
+};
+
 // Is this effect contributing pixels right now? Pulse effects must be
 // above the gate; continuous and scheduled effects ride activation.
-// Chroma is energy-driven: below ~half a pixel of split (bass·30 ≤ 0.6,
-// the 2D pipeline's own gate) the pass isn't worth dispatching.
 function passLive(effect, input) {
   if (!input.active.has(effect.id)) return false;
-  if (effect.id === 'chroma') return input.bass * 30 > 0.6;
-  if (effect.id === 'freeze-frame') return false;   // manifests as the frozen collapse
-  if (effect.id === 'stutter-loop') {
-    return (input.pulses['stutter-loop'] ?? 0) > 0.2
-        && (input.scheduled?.stutterBack ?? 0) >= 1;
-  }
-  if (effect.id === 'strobe-black') {
-    return (input.pulses['strobe-black'] ?? 0) > 0.25 && (input.frameNo ?? 0) % 2 === 0;
-  }
+  const override = LIVE_OVERRIDES[effect.id];
+  if (override) return override(input);
   if (effect.kind === 'pulse') return (input.pulses[effect.id] ?? 0) > PASS_GATE;
   return true;
 }
@@ -617,7 +624,7 @@ function buildPassPlan(input) {
     return [{ id: 'freeze-frame', program: 'freeze', uniforms: {} }];
   }
   const live = id => {
-    const e = FX_REGISTRY.find(f => f.id === id);
+    const e = FX_INDEX.get(id);
     return e ? passLive(e, input) : false;
   };
   const fold = (id, memberIds, mkUniforms) => {
@@ -1993,7 +2000,7 @@ function glDemoScene(t) {
   gl.drawArrays(gl.LINES, 0, verts.length / 6);
   gl.disable(gl.BLEND);
 }
-const glOk = glInit();
+glInit();
 
 // Scene-element simulation (positions/ages) — extracted from the old 2D
 // draw functions so spawned elements keep aging out while the GL sprite
