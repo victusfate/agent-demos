@@ -964,6 +964,57 @@ test('structure: GLSL registered for every color program', () => {
   }
 });
 
+// ---------- webgl slice 6 — temporal passes ----------
+
+test('buildPassPlan: frozen hold collapses the plan to the freeze pass', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const frozen = buildPassPlan(planInput({
+    active: new Set(['freeze-frame', 'thermal', 'glow']),
+    scheduled: { mirrorOn: false, tileN: 2, lbOpen: true, frozen: true, stutterBack: 0 },
+  }));
+  assert.deepEqual(frozen, [{ id: 'freeze-frame', program: 'freeze', uniforms: {} }]);
+  // frozen flag without the effect active (hand moved on) → normal plan
+  const lapsed = buildPassPlan(planInput({
+    active: new Set(['thermal']),
+    scheduled: { mirrorOn: false, tileN: 2, lbOpen: true, frozen: true, stutterBack: 0 },
+  }));
+  assert.ok(lapsed.find(p => p.id === 'thermal'));
+});
+
+test('buildPassPlan: stutter-loop needs both pulse and ring depth', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const sched = back => ({ mirrorOn: false, tileN: 2, lbOpen: true, frozen: false, stutterBack: back });
+  const live = buildPassPlan(planInput({
+    active: new Set(['stutter-loop']), pulses: { 'stutter-loop': 0.5 }, scheduled: sched(3) }));
+  assert.equal(live.find(p => p.id === 'stutter-loop').uniforms.back, 3);
+  const faded = buildPassPlan(planInput({
+    active: new Set(['stutter-loop']), pulses: { 'stutter-loop': 0.1 }, scheduled: sched(3) }));
+  assert.equal(faded.find(p => p.id === 'stutter-loop'), undefined);
+  const shallow = buildPassPlan(planInput({
+    active: new Set(['stutter-loop']), pulses: { 'stutter-loop': 0.5 }, scheduled: sched(0) }));
+  assert.equal(shallow.find(p => p.id === 'stutter-loop'), undefined);
+});
+
+test('buildPassPlan: strobe-black fires above 0.25 on even frames only', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const mk = (P, frameNo) => buildPassPlan(planInput({
+    active: new Set(['strobe-black']), pulses: { 'strobe-black': P }, frameNo }));
+  const hit = mk(0.5, 4).find(p => p.id === 'strobe-black');
+  assert.ok(Math.abs(hit.uniforms.strobe - 0.75) < 1e-9);   // min(1, P·1.5)
+  assert.equal(mk(0.5, 5).find(p => p.id === 'strobe-black'), undefined);
+  assert.equal(mk(0.2, 4).find(p => p.id === 'strobe-black'), undefined);
+});
+
+test('structure: temporal GLSL programs and feedback capture exist', () => {
+  const app = appScript();
+  for (const key of ['echo-trails', 'time-smear', 'motion-ghost', 'droste',
+                     'strobe-black', 'interlace-roll', 'freeze', 'stutter-loop']) {
+    assert.match(app, new RegExp(`['"]?${key}['"]?:\\s*\`#version 300 es`),
+      `${key} shader`);
+  }
+  assert.ok(app.includes('copyTexSubImage2D'), 'feedback/ring capture via texture copy');
+});
+
 // ---------- webgl slice 3 — GL skeleton (structural) ----------
 
 test('structure: main canvas runs WebGL2, not 2d', () => {
