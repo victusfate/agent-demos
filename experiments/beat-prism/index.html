@@ -113,6 +113,18 @@
   #seek { width: min(34vw, 320px); accent-color: var(--cyn); }
   #time { color: #fff; }
 
+  #perf {
+    position: fixed; top: 14px; left: 16px; z-index: 2; display: none;
+    padding: 8px 12px; border-radius: 10px; white-space: pre; pointer-events: none;
+    font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    font-size: .72rem; line-height: 1.55; letter-spacing: .06em; color: #bfeaff;
+    background: rgba(4,2,12,.78); border: 1px solid rgba(143,91,255,.45);
+    box-shadow: 0 0 24px rgba(143,91,255,.25); backdrop-filter: blur(8px);
+  }
+  #perf.show { display: block; }
+  #perf .good { color: var(--cyn); text-shadow: 0 0 8px var(--cyn); }
+  #perf .warn { color: #ffd24a; text-shadow: 0 0 8px rgba(255,210,74,.7); }
+  #perf .bad  { color: var(--mag); text-shadow: 0 0 8px var(--mag); }
   #hint {
     position: fixed; bottom: 16px; right: 18px; z-index: 2; pointer-events: none;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .7rem;
@@ -130,6 +142,15 @@
     box-shadow: inset 0 0 80px rgba(47,240,255,.35); transition: opacity .2s ease;
   }
   #dropglow.show { opacity: 1; }
+  #nogl {
+    position: fixed; inset: 0; z-index: 5; display: none;
+    align-items: center; justify-content: center; text-align: center;
+    color: #ffd9fb; background: #06020d;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 1rem; letter-spacing: .12em; line-height: 2;
+    text-shadow: 0 0 14px var(--mag);
+  }
+  #nogl.show { display: flex; }
 </style>
 </head>
 <body>
@@ -139,7 +160,7 @@
   <h1>beat-prism</h1>
   <p>drop a video — or click to hear the demo</p>
   <p>beats are predicted live; 46 effects fire with the music</p>
-  <p class="keys">space play/pause &nbsp; d demo &nbsp; e effects &nbsp; r shuffle &nbsp; s save png</p>
+  <p class="keys">space play/pause &nbsp; d demo &nbsp; e effects &nbsp; r shuffle &nbsp; f fps &nbsp; s save png</p>
 </div>
 <div id="hud">
   <span class="bpm-box">BPM <span id="bpm">—</span><span id="beatdot"></span></span>
@@ -161,9 +182,11 @@
   <span id="time">0:00 / 0:00</span>
 </div>
 <div id="drawer"></div>
-<div id="hint">[space] play &nbsp; [d]emo &nbsp; [e]ffects &nbsp; [r] shuffle &nbsp; [s]ave</div>
+<div id="perf"></div>
+<div id="hint">[space] play &nbsp; [d]emo &nbsp; [e]ffects &nbsp; [r] shuffle &nbsp; [f]ps &nbsp; [s]ave</div>
 <div id="toast"></div>
 <div id="dropglow"></div>
+<div id="nogl">beat-prism needs WebGL2<br>every 2020s-era browser has it — yours has it switched off</div>
 
 <script id="logic">
 'use strict';
@@ -455,6 +478,283 @@ function posterizeCurve(v, levels) {
 // Index of the frame `back` steps behind `head` in a ring of `size`.
 const ringIndex = (head, back, size) => (((head - back) % size) + size) % size;
 
+// ──────────────── webgl pass plan (docs/beat-prism-webgl) ────────────────
+
+// A "pass" is one fragment-shader draw over a full-screen quad. The plan
+// is the ordered list the GL frame executes: base (geometry) → color →
+// temporal → overlay. Light color and screen-space overlay effects fold
+// into one pass each (members listed); heavy color and temporal effects
+// keep individual programs. Scene sprites draw after the chain and are
+// not passes.
+const PASS_GATE = 0.02;   // a pulse decayed below this no longer earns a pass
+const COLOR_FOLD = ['hue-spin', 'sat-pump', 'bleach-burn', 'gamma-flicker',
+                    'color-drain', 'posterize', 'invert-strobe', 'flash'];
+const OVERLAY_FOLD = ['glow', 'scanlines', 'vhs-band', 'grain-burst',
+                      'vignette-pump', 'letterbox-snap', 'starburst', 'shockwave'];
+
+const FX_INDEX = new Map(FX_REGISTRY.map(e => [e.id, e]));
+
+// Per-effect liveness overrides — effects whose gating differs from their
+// kind's default: chroma is energy-driven (below ~half a pixel of split,
+// bass·30 ≤ 0.6, the pass isn't worth dispatching); freeze-frame only
+// manifests as the frozen collapse; stutter needs ring depth; strobe
+// keeps its even-frame parity.
+const LIVE_OVERRIDES = {
+  chroma: input => input.bass * 30 > 0.6,
+  'freeze-frame': () => false,
+  'stutter-loop': input => (input.pulses['stutter-loop'] ?? 0) > 0.2
+                        && (input.scheduled?.stutterBack ?? 0) >= 1,
+  'strobe-black': input => (input.pulses['strobe-black'] ?? 0) > 0.25
+                        && (input.frameNo ?? 0) % 2 === 0,
+};
+
+// Is this effect contributing pixels right now? Pulse effects must be
+// above the gate; continuous and scheduled effects ride activation.
+function passLive(effect, input) {
+  if (!input.active.has(effect.id)) return false;
+  const override = LIVE_OVERRIDES[effect.id];
+  if (override) return override(input);
+  if (effect.kind === 'pulse') return (input.pulses[effect.id] ?? 0) > PASS_GATE;
+  return true;
+}
+
+// Uniform synthesizers for solo (non-folded) passes that need more than
+// frame globals; absent entries mean the shader runs on uT/uRes alone.
+const SOLO_UNIFORMS = {
+  'channel-swap': input => ({ mix: Math.min(1, (input.pulses['channel-swap'] ?? 0) * 1.2) }),
+  chroma: input => ({ amount: input.bass * 30 }),
+  'stutter-loop': input => ({ back: input.scheduled?.stutterBack ?? 0 }),
+  'strobe-black': input => ({ strobe: Math.min(1, (input.pulses['strobe-black'] ?? 0) * 1.5) }),
+};
+
+// Combined transfer-curve uniforms for the single folded color pass —
+// the GL replacement for the old ctx.filter string stack. Multiplicative
+// members compose; neutral values mean "member not live". levels > 0
+// switches on true per-pixel posterize (GL-native upgrade).
+function colorFoldUniforms(members, pulses, ctx) {
+  const u = { brightness: 1, saturation: 1, hue: 0, gray: 0,
+              contrast: 1, invert: 0, flash: 0, levels: 0 };
+  const has = id => members.includes(id);
+  const P = id => pulses[id] ?? 0;
+  if (has('hue-spin')) u.hue = ctx.hueBase + P('hue-spin') * 45;
+  if (has('sat-pump')) u.saturation *= 1 + P('sat-pump') * 2.6;
+  if (has('bleach-burn')) {
+    u.brightness *= 1 + P('bleach-burn') * 1.5;
+    u.saturation *= 1 - P('bleach-burn') * 0.75;
+  }
+  if (has('gamma-flicker')) u.brightness *= 0.72 + ctx.treble * 1.8 + 0.18 * Math.sin(ctx.tSec * 39);
+  if (has('color-drain')) u.gray = P('color-drain');
+  if (has('posterize')) {
+    u.saturation *= 1.5;
+    u.contrast *= 2.2 + posterizeCurve(ctx.bass, 4) * 3;
+    u.brightness *= 1.1;
+    u.levels = 6;
+  }
+  if (has('invert-strobe')) u.invert = P('invert-strobe') > 0.5 ? 1 : 0;
+  if (has('flash')) u.flash = P('flash') * 0.38;
+  return u;
+}
+
+// Per-member intensities for the single folded overlay pass. Time-driven
+// motion (vhs scroll, starburst rotation) happens in the shader off uT;
+// these uniforms carry only the strengths.
+function overlayFoldUniforms(members, pulses, ctx) {
+  const u = { glow: 0, scanlines: 0, vhs: 0, grain: 0,
+              vignette: 0, letterbox: 0, starburst: 0, shockwave: 0 };
+  const has = id => members.includes(id);
+  const P = id => pulses[id] ?? 0;
+  if (has('glow')) u.glow = Math.min(1, ctx.treble * 2.2);
+  if (has('scanlines')) u.scanlines = 0.75;
+  if (has('vhs-band')) u.vhs = 1;
+  if (has('grain-burst')) u.grain = P('grain-burst') * 0.5;
+  if (has('vignette-pump')) u.vignette = P('vignette-pump');
+  if (has('letterbox-snap')) u.letterbox = ctx.lbPos ?? 0;
+  if (has('starburst')) u.starburst = P('starburst');
+  if (has('shockwave')) u.shockwave = P('shockwave');
+  return u;
+}
+
+// Column-major 3×3 multiply: result applies B first, then A.
+function mat3mul(A, B) {
+  const r = new Array(9);
+  for (let c = 0; c < 3; c++) {
+    for (let w = 0; w < 3; w++) {
+      r[c * 3 + w] = A[w] * B[c * 3] + A[3 + w] * B[c * 3 + 1] + A[6 + w] * B[c * 3 + 2];
+    }
+  }
+  return r;
+}
+
+// All affine geometry pulses composed into one sampling matrix (clip
+// space, origin at center — centering is free in GL). Same operation
+// order as the 2D ctx-transform stack: shake outermost, then zoom, jolt,
+// spin-zoom, squash, skew, mirror. Amplitudes are parity with the 2D
+// pipeline (shake-style pulses stay subtle, per design emphasis).
+function geometryMatrix({ pulses, active, joltDir, mirrorOn, shake }) {
+  const live = id => active.has(id) && (pulses[id] ?? 0) > PASS_GATE;
+  const P = id => pulses[id] ?? 0;
+  const rot = a => [Math.cos(a), Math.sin(a), 0, -Math.sin(a), Math.cos(a), 0, 0, 0, 1];
+  const scale = (x, y) => [x, 0, 0, 0, y, 0, 0, 0, 1];
+  // translation lives in m[6], m[7] (column-major)
+  let m = [1, 0, 0, 0, 1, 0, shake?.[0] ?? 0, shake?.[1] ?? 0, 1];
+  if (live('zoom')) m = mat3mul(m, scale(1 + P('zoom') * 0.07, 1 + P('zoom') * 0.07));
+  if (live('rotate-jolt')) m = mat3mul(m, rot(joltDir * P('rotate-jolt') * 0.12));
+  if (live('spin-zoom')) {
+    const z = 1 + P('spin-zoom') * 0.4;
+    m = mat3mul(m, mat3mul(rot(P('spin-zoom') * 0.55), scale(z, z)));
+  }
+  if (live('squash')) m = mat3mul(m, scale(1 + P('squash') * 0.2, 1 - P('squash') * 0.24));
+  if (live('skew-tilt')) {
+    const k = joltDir * P('skew-tilt');
+    m = mat3mul(m, [1, k * 0.14, 0, k * 0.3, 1, 0, 0, 0, 1]);
+  }
+  if (active.has('mirror-flip') && mirrorOn) m = mat3mul(m, scale(-1, 1));
+  return m;
+}
+
+// Ordered pass list from frame state. Pure and deterministic — registry
+// order within each section. input: { active: Set<id>, pulses: {id→0..1},
+// bass, treble: 0..1, tSec, hueBase, joltDir, sliceSeed, frameNo,
+// shake: [x,y], scheduled: { mirrorOn, tileN, lbOpen, lbPos, frozen,
+// stutterBack } }.
+// Returns [{ id, program, uniforms, members? }].
+function buildPassPlan(input) {
+  // a frozen hold replaces the whole chain with the held ring frame
+  if (input.scheduled?.frozen && input.active.has('freeze-frame')) {
+    return [{ id: 'freeze-frame', program: 'freeze', uniforms: {} }];
+  }
+  const live = id => {
+    const e = FX_INDEX.get(id);
+    return e ? passLive(e, input) : false;
+  };
+  const fold = (id, memberIds, mkUniforms) => {
+    const members = memberIds.filter(live);
+    return members.length
+      ? [{ id, program: id, uniforms: mkUniforms(members), members }] : [];
+  };
+  const solo = ids => ids.filter(live).map(id =>
+    ({ id, program: id, uniforms: SOLO_UNIFORMS[id]?.(input) ?? {} }));
+  const byCat = cat => FX_REGISTRY.filter(e => e.cat === cat).map(e => e.id);
+  const colorHeavy = byCat('color').filter(id => !COLOR_FOLD.includes(id));
+  const matrix = geometryMatrix({
+    pulses: input.pulses, active: input.active, joltDir: input.joltDir ?? 1,
+    mirrorOn: input.scheduled?.mirrorOn ?? false, shake: input.shake ?? [0, 0],
+  });
+  // base pass variant: geometry *replacements* are program forks (same
+  // priority chain as the 2D pipeline); pixelate is a UV-quantize uniform
+  // that rides whichever variant won.
+  const P = id => input.pulses[id] ?? 0;
+  const base = { id: 'base', program: 'base', uniforms: { matrix } };
+  base.uniforms.block = live('pixelate') ? 3 + P('pixelate') * 26 : 0;
+  if (live('kaleidoscope')) {
+    base.program = 'kaleido';
+    base.uniforms.wedges = 8;
+  } else if (live('tile-grid')) {
+    base.program = 'tile';
+    base.uniforms.tiles = input.scheduled?.tileN ?? 2;
+  } else if (live('slice-glitch')) {
+    base.program = 'slice';
+    base.uniforms.offsets = sliceOffsets(input.sliceSeed ?? 1, 14, 70 * P('slice-glitch'));
+  } else if (live('v-slice')) {
+    base.program = 'vslice';
+    base.uniforms.offsets = sliceOffsets((input.sliceSeed ?? 1) + 1, 14, 70 * P('v-slice'));
+  }
+  return [
+    base,
+    ...fold('color', COLOR_FOLD, members => colorFoldUniforms(members, input.pulses,
+        { bass: input.bass, treble: input.treble, tSec: input.tSec, hueBase: input.hueBase ?? 0 })),
+    ...solo(colorHeavy),
+    ...solo(byCat('temporal')),
+    ...fold('overlay', OVERLAY_FOLD, members => overlayFoldUniforms(members, input.pulses,
+        { treble: input.treble, tSec: input.tSec, lbPos: input.scheduled?.lbPos ?? 0 })),
+  ];
+}
+
+// hsl → rgb (h in degrees, s/l in 0..1) — the sprite layer's replacement
+// for the 2D pipeline's hsl() fillStyle strings.
+function hslToRgb(h, s, l) {
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [f(0), f(8), f(4)];
+}
+
+// Flatten scene elements into instanced-sprite buffers. Stride 10:
+// [cx, cy, w, h, rot, r, g, b, alpha, cell]. `add` draws additive
+// (burst glow, bolts, glyphs — the 2D 'lighter' group), `norm` draws
+// with normal alpha (confetti). Cells: 0 soft circle, 1 solid rect,
+// 2 soft bar, 3+ glyph atlas cells. Pure.
+function packSprites(particles, bolts, glyphs) {
+  const add = [], norm = [];
+  for (const p of particles) {
+    const f = 1 - p.age / p.life;
+    if (p.kind === 'confetti') {
+      const [r, g, b] = hslToRgb(p.hue, 0.95, 0.62);
+      norm.push(p.x, p.y, p.r * 2, p.r * 1.1, p.rot, r, g, b, Math.min(1, f * 1.6), 1);
+    } else {
+      const [r, g, b] = hslToRgb(p.hue, 1, 0.65);
+      add.push(p.x, p.y, p.r * (0.5 + f) * 6, p.r * (0.5 + f) * 6, 0, r, g, b, f * 0.9, 0);
+    }
+  }
+  for (const bolt of bolts) {
+    const f = 1 - bolt.age / bolt.life;
+    for (const [x1, y1, x2, y2] of bolt.segs) {
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      add.push((x1 + x2) / 2, (y1 + y2) / 2, len + 8, 14,
+               Math.atan2(y2 - y1, x2 - x1), 0.92, 0.96, 1, f, 2);
+    }
+  }
+  for (const g of glyphs) {
+    const f = 1 - g.age / g.life, pop = 1.35 - f * 0.35;
+    const [r, gg, b] = hslToRgb(g.hue, 1, 0.7);
+    add.push(g.x, g.y, g.size * pop, g.size * pop, 0, r, gg, b, f, 3 + g.ci);
+  }
+  return { add, norm };
+}
+
+// ──────────────── fps diagnostics ────────────────
+
+// Standard display refresh periods. The best sustained frame interval
+// snaps to the nearest so missed-vsync math stays exact (16.9 → 16.67).
+const REFRESH_RATES_HZ = [240, 165, 144, 120, 90, 75, 60, 50, 30];
+function snapRefreshMs(intervalMs) {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return null;
+  let best = null, bestD = Infinity;
+  for (const hz of REFRESH_RATES_HZ) {
+    const p = 1000 / hz;
+    const d = Math.abs(p - intervalMs);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+// Vsync intervals a frame overshot: 2× the base period = 1 missed frame.
+// Rounding gives ~half-period tolerance for rAF timestamp jitter; no base
+// estimate yet (0/null) counts nothing rather than guessing.
+const missedVsync = (durMs, baseMs) =>
+  baseMs > 0 ? Math.max(0, Math.round(durMs / baseMs) - 1) : 0;
+
+// Summarize a window of frame durations (ms): fps from the mean, p95/max
+// spike sizes, the refresh base estimated from the 10th percentile (best
+// sustained pace — robust to one-off short frames), and how many vsyncs
+// the window missed against that base. Sustained half-rate therefore
+// reads as a lower base, not as a wall of drops. Pure.
+function frameStats(durations) {
+  if (!durations || !durations.length) {
+    return { fps: 0, avgMs: 0, p95Ms: 0, maxMs: 0, baseMs: null, dropped: 0 };
+  }
+  const sorted = [...durations].sort((a, b) => a - b);
+  const at = q => sorted[Math.floor(q * (sorted.length - 1))];
+  let sum = 0;
+  for (const d of durations) sum += d;
+  const avgMs = sum / durations.length;
+  const baseMs = snapRefreshMs(at(0.1));
+  let dropped = 0;
+  for (const d of durations) dropped += missedVsync(d, baseMs ?? 0);
+  return { fps: 1000 / avgMs, avgMs, p95Ms: at(0.95),
+           maxMs: sorted[sorted.length - 1], baseMs, dropped };
+}
+
 // m:ss readout for the transport bar; degenerate input shows 0:00.
 function formatTime(sec) {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -472,6 +772,9 @@ globalThis.__logic = {
   spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
   FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, dealHand,
   sliceOffsets, wedgeAngles, posterizeCurve, ringIndex, formatTime, seekTarget,
+  snapRefreshMs, missedVsync, frameStats,
+  buildPassPlan, colorFoldUniforms, overlayFoldUniforms, geometryMatrix, mat3mul,
+  hslToRgb, packSprites,
 };
 })();
 </script>
@@ -480,23 +783,15 @@ globalThis.__logic = {
 const { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
         FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, dealHand,
         sliceOffsets, wedgeAngles, posterizeCurve, ringIndex,
-        formatTime, seekTarget } = globalThis.__logic;
+        formatTime, seekTarget, missedVsync, frameStats } = globalThis.__logic;
 
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const rand = (a, b) => a + Math.random() * (b - a);
 
-// ---------- canvas (main + reusable offscreen buffers) ----------
+// ---------- canvas (main = WebGL2; offscreen 2D buffers feed/await the port) ----------
 const canvas = document.getElementById('c');
-const ctx = canvas.getContext('2d');
-const mkCanvas = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
-const [src, sctx] = mkCanvas();      // the "source frame": video or demo scene
-const [fb, fbctx] = mkCanvas();      // echo-trails feedback
-const [sm, smctx] = mkCanvas();      // time-smear feedback
-const [gh, ghctx] = mkCanvas();      // motion-ghost snapshot
-const [dr, drctx] = mkCanvas();      // droste feedback
-const [pix, pixctx] = mkCanvas();    // pixelate downsample (sized on demand)
-let fbFresh = false, smFresh = false, ghFresh = false, drFresh = false, ghStamp = 0;
+let ghStamp = 0;          // motion-ghost capture cadence (GL feedback)
 let W = 0, H = 0;
 
 // static noise tile for grain-burst / vhs-band, rendered once
@@ -512,20 +807,13 @@ noiseCv.width = noiseCv.height = 128;
   }
   nctx.putImageData(img, 0, 0);
 }
-// scanline tile (2×4: lower half dark), patterns built lazily once ctx exists
-const scanCv = document.createElement('canvas');
-scanCv.width = 2; scanCv.height = 4;
-scanCv.getContext('2d').fillStyle = 'rgba(0,0,0,.5)';
-scanCv.getContext('2d').fillRect(0, 2, 2, 2);
-let scanPat = null, grainPat = null;
+let glSizeDirty = true;     // set by resize(); the GL renderer reallocs targets
 
 function resize() {
   W = window.innerWidth; H = window.innerHeight;
   canvas.width = W; canvas.height = H;
-  src.width = W; src.height = H;
-  for (const c of [fb, sm, gh, dr]) { c.width = W; c.height = H; }
-  fbFresh = smFresh = ghFresh = drFresh = false;
-  ring = null; ringFill = 0;                  // sizes changed — drop the frame ring
+  dropGlTemporal(true);                       // sizes changed — drop ring + feedback
+  glSizeDirty = true;                         // ping-pong targets realloc next frame
 }
 window.addEventListener('resize', resize);
 
@@ -676,6 +964,7 @@ function loadVideo(file) {
   video.src = objectUrl;
   mode = 'video';
   resetDetector();
+  resetPerf();        // drop totals are per-source
   syncTransport();
   video.play().catch(() => toast('press space to play'));
   toast(file.name);
@@ -687,6 +976,7 @@ function toDemo() {
   video.pause();
   mode = 'demo';
   resetDetector();
+  resetPerf();
   syncTransport();
   startDemo();
   toast('demo loop');
@@ -793,39 +1083,6 @@ function confetti() {
     });
   }
 }
-function drawParticles(dt) {
-  if (!particles.length) return;
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.age += dt;
-    if (p.age >= p.life || !A(p.kind)) { particles.splice(i, 1); continue; }
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    const f = 1 - p.age / p.life;
-    if (p.kind === 'confetti') {
-      p.vy += 420 * dt;                 // gravity, no drag — paper flutter
-      p.vx += Math.sin((p.age + p.rot) * 9) * 26 * dt;
-      p.rot += p.vr * dt;
-      ctx.globalAlpha = Math.min(1, f * 1.6);
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = `hsl(${p.hue} 95% 62%)`;
-      ctx.save();
-      ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-      ctx.fillRect(-p.r, -p.r * 0.55, p.r * 2, p.r * 1.1);
-      ctx.restore();
-    } else {
-      p.vx *= 0.985; p.vy *= 0.985;
-      ctx.globalAlpha = f * 0.9;
-      ctx.fillStyle = `hsl(${p.hue} 100% 65%)`;
-      ctx.shadowColor = ctx.fillStyle;
-      ctx.shadowBlur = 10;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (0.5 + f), 0, TAU); ctx.fill();
-    }
-  }
-  ctx.restore();
-}
-
 const bolts = [];
 function spawnLightning() {
   const segs = [];
@@ -840,32 +1097,13 @@ function spawnLightning() {
   bolts.push({ segs, life: 0.28, age: 0 });
   if (bolts.length > 4) bolts.shift();
 }
-function drawBolts(dt) {
-  for (let i = bolts.length - 1; i >= 0; i--) {
-    const b = bolts[i];
-    b.age += dt;
-    if (b.age >= b.life) { bolts.splice(i, 1); continue; }
-    const f = 1 - b.age / b.life;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = f;
-    ctx.strokeStyle = '#eaf6ff';
-    ctx.shadowColor = '#8f5bff';
-    ctx.shadowBlur = 22;
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    for (const [x1, y1, x2, y2] of b.segs) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
 const glyphs = [], GLYPH_SET = '◆▲●✦✸✚♦◢';
 function spawnGlyphs() {
   const n = 1 + ((Math.random() * 3) | 0);
   for (let i = 0; i < n; i++) {
+    const ci = (Math.random() * GLYPH_SET.length) | 0;
     glyphs.push({
-      ch: GLYPH_SET[(Math.random() * GLYPH_SET.length) | 0],
+      ch: GLYPH_SET[ci], ci,
       x: rand(W * 0.15, W * 0.85), y: rand(H * 0.2, H * 0.8),
       size: rand(42, 115), life: rand(0.4, 0.7), age: 0,
       hue: [305, 185, 262][(Math.random() * 3) | 0],
@@ -873,481 +1111,6 @@ function spawnGlyphs() {
   }
   if (glyphs.length > 14) glyphs.splice(0, glyphs.length - 14);
 }
-function drawGlyphs(dt) {
-  for (let i = glyphs.length - 1; i >= 0; i--) {
-    const g = glyphs[i];
-    g.age += dt;
-    if (g.age >= g.life) { glyphs.splice(i, 1); continue; }
-    const f = 1 - g.age / g.life, pop = 1.35 - f * 0.35;
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = f;
-    ctx.fillStyle = `hsl(${g.hue} 100% 70%)`;
-    ctx.shadowColor = ctx.fillStyle;
-    ctx.shadowBlur = 24;
-    ctx.font = `${Math.round(g.size * pop)}px ui-monospace, Menlo, Consolas, monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(g.ch, g.x, g.y);
-    ctx.restore();
-  }
-}
-
-// ---------- source frame: video (letterboxed) or demo scene ----------
-function drawSource(t) {
-  sctx.fillStyle = '#000';
-  sctx.fillRect(0, 0, W, H);
-  if (mode === 'video' && video.readyState >= 2 && video.videoWidth) {
-    const sc = Math.min(W / video.videoWidth, H / video.videoHeight);
-    const dw = video.videoWidth * sc, dh = video.videoHeight * sc;
-    sctx.drawImage(video, (W - dw) / 2, (H - dh) / 2, dw, dh);
-  } else {
-    drawDemoScene(t);
-  }
-}
-
-// procedural stand-in visuals: radial spectrum bars + rotating prism wireframe
-function drawDemoScene(t) {
-  const cx = W / 2, cy = H / 2, m = Math.min(W, H);
-  const bg = sctx.createRadialGradient(cx, cy, 0, cx, cy, m * 0.75);
-  bg.addColorStop(0, '#0b0418');
-  bg.addColorStop(1, '#000');
-  sctx.fillStyle = bg;
-  sctx.fillRect(0, 0, W, H);
-
-  // radial spectrum bars
-  const N = 96, R = m * 0.26;
-  sctx.save();
-  sctx.lineWidth = 2;
-  sctx.lineCap = 'round';
-  for (let i = 0; i < N; i++) {
-    const v = spectrum ? spectrum[2 + Math.floor(Math.pow(i / N, 1.8) * 360)] / 255 : 0;
-    const a = (i / N) * TAU + t * 0.12;
-    const len = Math.pow(v, 1.4) * m * 0.22 + 2;
-    const hue = (i / N) * 360 + t * 24;
-    sctx.strokeStyle = `hsl(${hue} 100% 62% / 0.75)`;
-    sctx.beginPath();
-    sctx.moveTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
-    sctx.lineTo(cx + Math.cos(a) * (R + len), cy + Math.sin(a) * (R + len));
-    sctx.stroke();
-  }
-  sctx.restore();
-
-  // rotating triangular prism wireframe
-  const s = m * (0.13 + 0.05 * bassS + 0.04 * pulses.zoom);
-  const ry = t * 0.5, rx = 0.45 + Math.sin(t * 0.21) * 0.3;
-  const pts = [];
-  for (const z of [-0.62, 0.62]) {
-    for (let i = 0; i < 3; i++) {
-      const a = ry * 0.55 + i * TAU / 3;
-      let x = Math.cos(a), y = Math.sin(a) * 1.12, zz = z;
-      let y2 = y * Math.cos(rx) - zz * Math.sin(rx);
-      let z2 = y * Math.sin(rx) + zz * Math.cos(rx);
-      const x2 = x * Math.cos(ry) + z2 * Math.sin(ry);
-      const z3 = -x * Math.sin(ry) + z2 * Math.cos(ry);
-      const pr = 3 / (3 + z3);
-      pts.push([cx + x2 * pr * s, cy + y2 * pr * s]);
-    }
-  }
-  const edges = [[0,1],[1,2],[2,0],[3,4],[4,5],[5,3],[0,3],[1,4],[2,5]];
-  sctx.save();
-  const hue = (t * 40) % 360;
-  sctx.strokeStyle = `hsl(${hue} 100% 68%)`;
-  sctx.shadowColor = `hsl(${hue} 100% 60%)`;
-  sctx.shadowBlur = 16;
-  sctx.lineWidth = 1.6;
-  sctx.beginPath();
-  for (const [a, b] of edges) { sctx.moveTo(...pts[a]); sctx.lineTo(...pts[b]); }
-  sctx.stroke();
-  // glowing core follows the bass
-  const core = 3 + bassS * m * 0.03;
-  sctx.fillStyle = '#fff';
-  sctx.shadowBlur = 24;
-  sctx.beginPath(); sctx.arc(cx, cy, core, 0, TAU); sctx.fill();
-  sctx.restore();
-}
-
-// ---------- composite: geometry → color → temporal → overlay → scene ----------
-
-// Base draw: the source frame through the active geometry *replacement*
-// (kaleidoscope / tile-grid / slice strips), optionally pixelated first.
-// The caller has already set the transform and the color filter string.
-function drawBase(t) {
-  let view = src;
-  if (A('pixelate') && pulses['pixelate'] > 0.05) {
-    const block = 3 + pulses['pixelate'] * 26;
-    const pw = Math.max(8, Math.round(W / block)), ph = Math.max(8, Math.round(H / block));
-    if (pix.width !== pw || pix.height !== ph) { pix.width = pw; pix.height = ph; }
-    pixctx.imageSmoothingEnabled = true;        // clean downsample…
-    pixctx.clearRect(0, 0, pw, ph);
-    pixctx.drawImage(src, 0, 0, pw, ph);
-    view = pix;
-    ctx.imageSmoothingEnabled = false;          // …hard blocks on the way up
-  }
-  if (A('kaleidoscope')) {
-    const n = 8, wr = TAU / n, R = Math.hypot(W, H);
-    const wa = wedgeAngles(n), drift = t * 0.11;
-    for (let i = 0; i < n; i++) {
-      ctx.save();
-      ctx.translate(W / 2, H / 2);
-      ctx.rotate(wa[i] + drift);
-      if (i % 2) ctx.scale(1, -1);              // mirror every other wedge
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, R, -wr / 2 - 0.01, wr / 2 + 0.01);
-      ctx.closePath();
-      ctx.clip();
-      ctx.drawImage(view, -W / 2, -H / 2, W, H);
-      ctx.restore();
-    }
-  } else if (A('tile-grid')) {
-    for (let i = 0; i < tileN; i++) {
-      for (let j = 0; j < tileN; j++) {
-        ctx.drawImage(view, 0, 0, view.width, view.height,
-                      i * W / tileN, j * H / tileN, W / tileN, H / tileN);
-      }
-    }
-  } else if (A('slice-glitch') && pulses['slice-glitch'] > 0.04) {
-    const nS = 14, hS = Math.ceil(H / nS), sy = view.height / H;
-    const offs = sliceOffsets(sliceSeed, nS, 70 * pulses['slice-glitch']);
-    for (let i = 0; i < nS; i++) {              // horizontal strips, shoved sideways
-      ctx.drawImage(view, 0, i * hS * sy, view.width, hS * sy, offs[i], i * hS, W, hS);
-    }
-  } else if (A('v-slice') && pulses['v-slice'] > 0.04) {
-    const nS = 14, wS = Math.ceil(W / nS), sx = view.width / W;
-    const offs = sliceOffsets(sliceSeed + 1, nS, 70 * pulses['v-slice']);
-    for (let i = 0; i < nS; i++) {              // vertical strips, shoved up/down
-      ctx.drawImage(view, i * wS * sx, 0, wS * sx, view.height, i * wS, offs[i], wS, H);
-    }
-  } else {
-    ctx.drawImage(view, 0, 0, W, H);
-  }
-  ctx.imageSmoothingEnabled = true;
-}
-
-function render(t, dt, nowMs) {
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, W, H);
-  const m = Math.min(W, H);
-  const P = id => pulses[id] ?? 0;
-  const onCenter = fn => {
-    ctx.translate(W / 2, H / 2); fn(); ctx.translate(-W / 2, -H / 2);
-  };
-
-  // ════ geometry: composed transforms, then the base draw ════
-  ctx.save();
-  if (A('shake') && P('shake') > 0.02) {
-    const a = rand(0, TAU), d = P('shake') * 13;
-    ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
-  }
-  if (A('zoom') && P('zoom') > 0.02) {
-    const z = 1 + P('zoom') * 0.07;
-    onCenter(() => ctx.scale(z, z));
-  }
-  if (A('rotate-jolt') && P('rotate-jolt') > 0.02) {
-    onCenter(() => ctx.rotate(joltDir * P('rotate-jolt') * 0.12));
-  }
-  if (A('spin-zoom') && P('spin-zoom') > 0.02) {
-    const z = 1 + P('spin-zoom') * 0.4;
-    onCenter(() => { ctx.rotate(P('spin-zoom') * 0.55); ctx.scale(z, z); });
-  }
-  if (A('squash') && P('squash') > 0.02) {
-    onCenter(() => ctx.scale(1 + P('squash') * 0.2, 1 - P('squash') * 0.24));
-  }
-  if (A('skew-tilt') && P('skew-tilt') > 0.02) {
-    onCenter(() => ctx.transform(1, joltDir * P('skew-tilt') * 0.14,
-                                 joltDir * P('skew-tilt') * 0.3, 1, 0, 0));
-  }
-  if (A('mirror-flip') && mirrorOn) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-
-  // ════ color: light effects ride the base draw as one filter stack ════
-  const filt = [];
-  if (A('hue-spin')) filt.push(`hue-rotate(${(hueBase + P('hue-spin') * 45).toFixed(1)}deg)`);
-  if (A('sat-pump')) filt.push(`saturate(${(1 + P('sat-pump') * 2.6).toFixed(3)})`);
-  if (A('bleach-burn')) {
-    filt.push(`brightness(${(1 + P('bleach-burn') * 1.5).toFixed(3)}) saturate(${(1 - P('bleach-burn') * 0.75).toFixed(3)})`);
-  }
-  if (A('gamma-flicker')) {
-    filt.push(`brightness(${(0.72 + trebleS * 1.8 + 0.18 * Math.sin(t * 39)).toFixed(3)})`);
-  }
-  if (A('color-drain')) filt.push(`grayscale(${P('color-drain').toFixed(3)})`);
-  if (A('posterize')) {
-    filt.push(`saturate(1.5) contrast(${(2.2 + posterizeCurve(bassS, 4) * 3).toFixed(3)}) brightness(1.1)`);
-  }
-  if (A('invert-strobe') && P('invert-strobe') > 0.5) filt.push('invert(1)');
-  ctx.filter = filt.length ? filt.join(' ') : 'none';
-  drawBase(t);
-  ctx.filter = 'none';
-
-  // chromatic aberration follows the bass (original look, original place)
-  const am = A('chroma') ? bassS * 30 : 0;
-  if (am > 0.6) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.32;
-    ctx.filter = 'hue-rotate(120deg) saturate(2.4)';
-    ctx.drawImage(src, am, 0);
-    ctx.filter = 'hue-rotate(240deg) saturate(2.4)';
-    ctx.drawImage(src, -am, 0);
-    ctx.restore();
-  }
-  ctx.restore();
-
-  // heavy color passes — filtered self-draws, so they respect geometry
-  if (A('sepia-ghost')) {
-    ctx.save();
-    ctx.filter = 'sepia(0.9) brightness(1.05)';
-    ctx.drawImage(canvas, 0, 0);
-    ctx.filter = 'sepia(0.9)';
-    ctx.globalAlpha = 0.28;
-    ctx.drawImage(canvas, 9, 0);                // the trailing ghost
-    ctx.restore();
-  }
-  if (A('duotone')) {
-    ctx.save();
-    ctx.filter = 'grayscale(1) contrast(1.15)';
-    ctx.drawImage(canvas, 0, 0);
-    ctx.filter = 'none';
-    ctx.globalCompositeOperation = 'multiply';  // shadows → magenta
-    ctx.fillStyle = '#ff3df0';
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalCompositeOperation = 'lighter';   // lift blacks toward deep cyan
-    ctx.globalAlpha = 0.2;
-    ctx.fillStyle = '#062330';
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
-  if (A('thermal')) {
-    ctx.save();                                 // luminance → fire palette
-    ctx.filter = 'grayscale(1) sepia(1) saturate(9) hue-rotate(-35deg) contrast(1.7) brightness(1.2)';
-    ctx.drawImage(canvas, 0, 0);
-    ctx.restore();
-  }
-  if (A('channel-swap') && P('channel-swap') > 0.04) {
-    ctx.save();
-    ctx.globalAlpha = Math.min(1, P('channel-swap') * 1.2);
-    ctx.filter = 'hue-rotate(135deg) saturate(1.3)';
-    ctx.drawImage(canvas, 0, 0);
-    ctx.restore();
-  }
-  if (A('neon-edge')) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'difference';  // flat areas cancel, edges remain
-    ctx.drawImage(canvas, 2, 1);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.filter = 'brightness(2.2) saturate(2.6)';
-    ctx.drawImage(canvas, 0, 0);
-    ctx.drawImage(canvas, 0, 0);
-    ctx.restore();
-  }
-  if (A('flash') && P('flash') > 0.02) {
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = P('flash') * 0.38;
-    ctx.fillStyle = '#cfe9ff';
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
-
-  // ════ temporal: feedback buffers, strobes, and the frame ring ════
-  if (A('echo-trails')) {
-    if (fbFresh) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.42;
-      ctx.drawImage(fb, -10, -10, W + 20, H + 20);  // slight outward zoom
-      ctx.restore();
-    }
-    fbctx.clearRect(0, 0, W, H);
-    fbctx.drawImage(canvas, 0, 0);
-    fbFresh = true;
-  } else fbFresh = false;
-  if (A('time-smear')) {
-    if (smFresh) {
-      ctx.save();
-      ctx.globalAlpha = 0.55;
-      ctx.filter = 'blur(4px)';
-      ctx.drawImage(sm, 0, 0);
-      ctx.restore();
-    }
-    smctx.clearRect(0, 0, W, H);
-    smctx.drawImage(canvas, 0, 0);
-    smFresh = true;
-  } else smFresh = false;
-  if (A('motion-ghost')) {
-    if (ghFresh) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      ctx.globalAlpha = 0.32;
-      ctx.drawImage(gh, Math.sin(t * 2.3) * 10, 0);  // a stale double, drifting
-      ctx.restore();
-    }
-    if (nowMs - ghStamp > 120) {
-      ghctx.clearRect(0, 0, W, H);
-      ghctx.drawImage(canvas, 0, 0);
-      ghStamp = nowMs;
-      ghFresh = true;
-    }
-  } else ghFresh = false;
-  if (A('droste')) {
-    if (drFresh) {
-      const s = 0.62;
-      ctx.save();
-      ctx.globalAlpha = 0.92;                   // last frame nested in — recursion emerges
-      ctx.drawImage(dr, W * (1 - s) / 2, H * (1 - s) / 2, W * s, H * s);
-      ctx.restore();
-    }
-    drctx.clearRect(0, 0, W, H);
-    drctx.drawImage(canvas, 0, 0);
-    drFresh = true;
-  } else drFresh = false;
-  if (A('interlace-roll')) {
-    const bh = 8, roll = (t * 90) % (bh * 2), j = 5 + Math.sin(t * 3.1) * 4;
-    ctx.save();
-    ctx.globalAlpha = 0.85;
-    for (let y = roll; y < H; y += bh * 2) {    // every other band, torn sideways
-      ctx.drawImage(canvas, 0, y, W, bh, j, y, W, bh);
-    }
-    ctx.restore();
-  }
-  if (A('strobe-black') && P('strobe-black') > 0.25 && frameNo % 2 === 0) {
-    ctx.save();
-    ctx.globalAlpha = Math.min(1, P('strobe-black') * 1.5);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
-  // frame ring — lazy while freeze-frame / stutter-loop live, freed after
-  if (A('freeze-frame') || A('stutter-loop')) {
-    if (!ring) { ring = new Array(RING_SIZE).fill(null); ringHead = -1; ringFill = 0; }
-    const frozen = nowMs < freezeUntil && A('freeze-frame');
-    if (!frozen) {                              // capture pauses while frozen
-      ringHead = (ringHead + 1) % RING_SIZE;
-      const slot = ring[ringHead] ?? (ring[ringHead] = document.createElement('canvas'));
-      if (slot.width !== W || slot.height !== H) { slot.width = W; slot.height = H; }
-      slot.getContext('2d').drawImage(canvas, 0, 0);
-      ringFill = Math.min(RING_SIZE, ringFill + 1);
-    }
-    if (frozen && ring[ringHead]) {
-      ctx.drawImage(ring[ringHead], 0, 0);      // hold the bar-start frame
-    } else if (A('stutter-loop') && P('stutter-loop') > 0.2 && ringFill >= 6) {
-      const back = 1 + ((nowMs / 50) | 0) % 5;
-      const slot = ring[ringIndex(ringHead, back, RING_SIZE)];
-      if (slot) {
-        ctx.save();
-        ctx.globalAlpha = 0.9;
-        ctx.drawImage(slot, 0, 0);              // replay recent frames, jumpily
-        ctx.restore();
-      }
-    }
-  } else if (ring) { ring = null; ringFill = 0; }
-
-  // ════ overlay ════
-  if (A('glow') && trebleS > 0.015) {           // edge glow follows the treble
-    ctx.save();
-    const hue = (t * 50) % 360;
-    ctx.globalAlpha = clamp(trebleS * 2.2, 0, 1);
-    ctx.strokeStyle = `hsl(${hue} 100% 64%)`;
-    ctx.shadowColor = `hsl(${hue} 100% 60%)`;
-    ctx.shadowBlur = 16 + trebleS * 70;
-    ctx.lineWidth = 2 + trebleS * 10;
-    ctx.strokeRect(4, 4, W - 8, H - 8);
-    ctx.restore();
-  }
-  if (A('scanlines')) {
-    scanPat ??= ctx.createPattern(scanCv, 'repeat');
-    ctx.save();
-    ctx.globalAlpha = 0.75;
-    ctx.fillStyle = scanPat;
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
-  if (A('vhs-band')) {
-    const y = ((t * 140) % (H + 120)) - 60, bh = 26;
-    ctx.save();
-    if (y > 0 && y + bh < H) ctx.drawImage(canvas, 0, y, W, bh, rand(-9, 9), y, W, bh);
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = 0.1;
-    ctx.fillStyle = '#cfeaff';
-    ctx.fillRect(0, y, W, bh);
-    ctx.globalAlpha = 0.2;
-    ctx.drawImage(noiseCv, 0, (t * 700) % 100, 128, 20, 0, y + 3, W, bh - 6);
-    ctx.restore();
-  }
-  if (A('grain-burst') && P('grain-burst') > 0.03) {
-    grainPat ??= ctx.createPattern(noiseCv, 'repeat');
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = P('grain-burst') * 0.5;
-    ctx.translate(-rand(0, 128), -rand(0, 128));
-    ctx.fillStyle = grainPat;
-    ctx.fillRect(0, 0, W + 128, H + 128);
-    ctx.restore();
-  }
-  if (A('vignette-pump')) {
-    const p = P('vignette-pump');
-    const g = ctx.createRadialGradient(W / 2, H / 2, Math.max(1, m * (0.62 - p * 0.25)),
-                                       W / 2, H / 2, m * 0.95);
-    g.addColorStop(0, 'rgba(0,0,0,0)');
-    g.addColorStop(1, `rgba(0,0,0,${(0.55 + p * 0.4).toFixed(3)})`);
-    ctx.save();
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-  }
-  if (A('letterbox-snap') || lbPos > 0.003) {
-    const target = A('letterbox-snap') && lbOpen ? 1 : 0;
-    lbPos += (target - lbPos) * Math.min(1, dt * 14);
-    const bh = H * 0.13 * lbPos;
-    if (bh > 0.5) {
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, W, bh);
-      ctx.fillRect(0, H - bh, W, bh);
-    }
-  }
-  if (A('starburst') && P('starburst') > 0.03) {
-    const p = P('starburst');
-    ctx.save();
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = p;
-    ctx.strokeStyle = '#fff';
-    ctx.shadowColor = '#9ff0ff';
-    ctx.shadowBlur = 18;
-    ctx.lineWidth = 2.2;
-    ctx.beginPath();
-    for (const a0 of wedgeAngles(12)) {
-      const a = a0 + t * 0.35;
-      ctx.moveTo(W / 2 + Math.cos(a) * m * 0.05, H / 2 + Math.sin(a) * m * 0.05);
-      ctx.lineTo(W / 2 + Math.cos(a) * m * (0.08 + p * 0.55),
-                 H / 2 + Math.sin(a) * m * (0.08 + p * 0.55));
-    }
-    ctx.stroke();
-    ctx.restore();
-  }
-  if (A('shockwave') && P('shockwave') > 0.03) {
-    const p = P('shockwave');
-    ctx.save();
-    ctx.globalAlpha = p;
-    ctx.strokeStyle = 'rgba(150,240,255,.9)';
-    ctx.shadowColor = '#2ff0ff';
-    ctx.shadowBlur = 24;
-    ctx.lineWidth = 2 + p * 13;
-    ctx.beginPath();
-    ctx.arc(W / 2, H / 2, m * 0.04 + (1 - p) * m * 0.65, 0, TAU);  // expands as it fades
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // ════ scene ════
-  drawParticles(dt);
-  drawBolts(dt);
-  drawGlyphs(dt);
-
-  for (const key of Object.keys(pulses)) {
-    pulses[key] = decayPulse(pulses[key], dt * 1000, HALF_LIFE[key] ?? 150);
-  }
-}
-
 // ---------- HUD: hand chips, drawer, shuffle ----------
 const bpmEl = document.getElementById('bpm');
 const dotEl = document.getElementById('beatdot');
@@ -1514,6 +1277,12 @@ window.addEventListener('keydown', e => {
     begin();
     toDemo();
   } else if (e.key === 's') {
+    // the GL back buffer isn't preserved across tasks — redraw, then capture
+    if (gl && !glLost && lastPlan) {
+      glRender(lastPlan, lastPlanT, lastPlanMs);
+      const sp = packSprites(particles, bolts, glyphs);
+      glSprites(sp.add, sp.norm);
+    }
     const a = document.createElement('a');
     a.download = 'beat-prism.png';
     a.href = canvas.toDataURL('image/png');
@@ -1521,6 +1290,8 @@ window.addEventListener('keydown', e => {
     toast('frame saved');
   } else if (e.key === 'r') {
     enableShuffle();
+  } else if (e.key === 'f') {
+    togglePerf();
   } else if (e.key === 'e') {
     drawerEl.classList.toggle('open');
   } else if (e.key === '0') {
@@ -1538,10 +1309,778 @@ window.addEventListener('keydown', e => {
   }
 });
 
+// ---------- webgl renderer ----------
+// One vertex shader for every pass: a full-screen quad, transformed by
+// uMatrix (identity except the base pass, which carries the composed
+// geometry matrix). Fragment shaders are registered per program key in
+// SHADERS; glRender executes whatever subset of the pass plan has a
+// registered program, so effect families come alive slice by slice.
+const QUAD_VS = `#version 300 es
+layout(location=0) in vec2 aPos;
+uniform mat3 uMatrix;
+out vec2 vUV;
+void main() {
+  vUV = aPos * 0.5 + 0.5;
+  vec3 p = uMatrix * vec3(aPos, 1.0);
+  gl_Position = vec4(p.xy, 0.0, 1.0);
+}`;
+
+// Shared fragment preamble: every pass gets resolution, time, and the
+// pixelate UV-quantizer (uBlock = 0 → off) so pixelate rides any variant.
+const FS_COMMON = `
+precision highp float;
+in vec2 vUV; out vec4 outColor;
+uniform sampler2D uTex;
+uniform vec2 uRes;
+uniform float uT;
+uniform float uBlock;
+uniform vec2 uFit;
+const float TAU = 6.28318530718;
+vec2 pixelUV(vec2 uv) {
+  if (uBlock < 0.5) return uv;
+  vec2 g = uRes / uBlock;
+  return (floor(uv * g) + 0.5) / g;
+}
+// aspect-fit sampling for the base family: video letterboxing happens
+// here (uFit > 1 → bars), not in a 2D canvas relay
+vec4 srcTexAt(vec2 uv) {
+  vec2 f = (uv - 0.5) * uFit + 0.5;
+  if (f.x < 0.0 || f.x > 1.0 || f.y < 0.0 || f.y > 1.0) return vec4(0.0, 0.0, 0.0, 1.0);
+  return texture(uTex, f);
+}`;
+
+const SHADERS = {
+  base: `#version 300 es${FS_COMMON}
+void main() { outColor = vec4(srcTexAt(pixelUV(vUV)).rgb, 1.0); }`,
+
+  // true polar kaleidoscope — aspect-corrected, mirrored alternate wedges,
+  // slow drift (GL-native upgrade over the 2D clipped-wedge approximation)
+  kaleido: `#version 300 es${FS_COMMON}
+uniform float uWedges;
+void main() {
+  vec2 c = vUV - 0.5;
+  c.x *= uRes.x / uRes.y;
+  float r = length(c);
+  float a = atan(c.y, c.x) + uT * 0.11;
+  float w = TAU / uWedges;
+  a = mod(a, w * 2.0);
+  a = abs(a - w);
+  vec2 uv = vec2(cos(a), sin(a)) * r;
+  uv.x *= uRes.y / uRes.x;
+  outColor = vec4(srcTexAt(pixelUV(clamp(uv + 0.5, 0.0, 1.0))).rgb, 1.0);
+}`,
+
+  tile: `#version 300 es${FS_COMMON}
+uniform float uTiles;
+void main() { outColor = vec4(srcTexAt(pixelUV(fract(vUV * uTiles))).rgb, 1.0); }`,
+
+  slice: `#version 300 es${FS_COMMON}
+uniform float uOffsets[14];
+void main() {
+  int i = int(floor((1.0 - vUV.y) * 14.0));
+  vec2 uv = vUV;
+  uv.x -= uOffsets[clamp(i, 0, 13)] / uRes.x;
+  outColor = vec4(srcTexAt(pixelUV(clamp(uv, 0.0, 1.0))).rgb, 1.0);
+}`,
+
+  vslice: `#version 300 es${FS_COMMON}
+uniform float uOffsets[14];
+void main() {
+  int i = int(floor(vUV.x * 14.0));
+  vec2 uv = vUV;
+  uv.y += uOffsets[clamp(i, 0, 13)] / uRes.y;
+  outColor = vec4(srcTexAt(pixelUV(clamp(uv, 0.0, 1.0))).rgb, 1.0);
+}`,
+
+  // ── color: the folded transfer pass + heavy programs ──
+  // (the upgrade-budget family: true per-pixel posterize, real RGB-split
+  // chroma, actual channel rotation, palette thermal — per design.md)
+  color: `#version 300 es${FS_COMMON}
+uniform float uBrightness, uSaturation, uHue, uGray, uContrast, uInvert, uFlash, uLevels;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+vec3 hueRotate(vec3 c, float deg) {
+  float a = radians(deg), ca = cos(a), sa = sin(a);
+  mat3 m = mat3(
+    0.213 + ca * 0.787 - sa * 0.213, 0.715 - ca * 0.715 - sa * 0.715, 0.072 - ca * 0.072 + sa * 0.928,
+    0.213 - ca * 0.213 + sa * 0.143, 0.715 + ca * 0.285 + sa * 0.140, 0.072 - ca * 0.072 - sa * 0.283,
+    0.213 - ca * 0.213 - sa * 0.787, 0.715 - ca * 0.715 + sa * 0.715, 0.072 + ca * 0.928 + sa * 0.072);
+  return c * m;
+}
+void main() {
+  vec3 c = texture(uTex, vUV).rgb;
+  c *= uBrightness;
+  c = mix(vec3(dot(c, LUMA)), c, uSaturation);
+  if (abs(uHue) > 0.01) c = hueRotate(c, uHue);
+  c = mix(c, vec3(dot(c, LUMA)), uGray);
+  c = (c - 0.5) * uContrast + 0.5;
+  if (uLevels > 0.5) c = floor(clamp(c, 0.0, 1.0) * (uLevels - 1.0) + 0.5) / (uLevels - 1.0);
+  c = mix(c, 1.0 - c, uInvert);
+  c += uFlash * vec3(0.81, 0.91, 1.0);
+  outColor = vec4(c, 1.0);
+}`,
+
+  duotone: `#version 300 es${FS_COMMON}
+void main() {
+  float l = dot(texture(uTex, vUV).rgb, vec3(0.2126, 0.7152, 0.0722));
+  l = clamp((l - 0.5) * 1.15 + 0.5, 0.0, 1.0);
+  vec3 c = l * vec3(1.0, 0.24, 0.94);              // shadows → magenta
+  c += 0.2 * vec3(0.024, 0.137, 0.188);            // blacks lift toward deep cyan
+  outColor = vec4(c, 1.0);
+}`,
+
+  thermal: `#version 300 es${FS_COMMON}
+void main() {
+  float l = dot(texture(uTex, vUV).rgb, vec3(0.2126, 0.7152, 0.0722));
+  l = clamp((l - 0.5) * 1.25 + 0.55, 0.0, 1.0);
+  vec3 c = vec3(clamp(l * 2.4, 0.0, 1.0), pow(l, 1.8), pow(l, 4.0) * 0.6);
+  outColor = vec4(c, 1.0);
+}`,
+
+  'sepia-ghost': `#version 300 es${FS_COMMON}
+vec3 sep(vec3 c) {
+  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  return l * vec3(1.07, 0.74, 0.43);
+}
+void main() {
+  vec3 c = sep(texture(uTex, vUV).rgb) * 1.05;
+  c += 0.28 * sep(texture(uTex, vUV - vec2(9.0 / uRes.x, 0.0)).rgb);
+  outColor = vec4(c, 1.0);
+}`,
+
+  'channel-swap': `#version 300 es${FS_COMMON}
+uniform float uMix;
+void main() {
+  vec3 c = texture(uTex, vUV).rgb;
+  outColor = vec4(mix(c, c.gbr, uMix), 1.0);       // true channel rotation
+}`,
+
+  'neon-edge': `#version 300 es${FS_COMMON}
+void main() {
+  vec3 a = texture(uTex, vUV).rgb;
+  vec3 b = texture(uTex, vUV + vec2(2.0, 1.0) / uRes).rgb;
+  vec3 e = abs(a - b) * 6.0;                        // real edge difference
+  vec3 c = a * 0.18 + e * vec3(1.6, 2.3, 2.6);
+  outColor = vec4(c, 1.0);
+}`,
+
+  chroma: `#version 300 es${FS_COMMON}
+uniform float uAmount;
+void main() {
+  float dx = uAmount / uRes.x;
+  vec3 c;
+  c.r = texture(uTex, clamp(vUV + vec2(dx, 0.0), 0.0, 1.0)).r;
+  c.g = texture(uTex, vUV).g;
+  c.b = texture(uTex, clamp(vUV - vec2(dx, 0.0), 0.0, 1.0)).b;
+  outColor = vec4(c, 1.0);                          // true RGB split
+}`,
+
+  // ── temporal: uTex2 carries last frame's captured output / ring frames ──
+  'echo-trails': `#version 300 es${FS_COMMON}
+uniform sampler2D uTex2;
+void main() {
+  vec3 c = texture(uTex, vUV).rgb;
+  vec2 z = (vUV - 0.5) * (1.0 - 14.0 / uRes.y) + 0.5;   // slight outward zoom
+  c += texture(uTex2, z).rgb * 0.42;
+  outColor = vec4(c, 1.0);
+}`,
+
+  'time-smear': `#version 300 es${FS_COMMON}
+uniform sampler2D uTex2;
+void main() {
+  vec2 d = 4.0 / uRes;
+  vec3 f = (texture(uTex2, vUV + vec2(d.x, 0.0)) + texture(uTex2, vUV - vec2(d.x, 0.0))
+          + texture(uTex2, vUV + vec2(0.0, d.y)) + texture(uTex2, vUV - vec2(0.0, d.y))).rgb * 0.25;
+  outColor = vec4(mix(texture(uTex, vUV).rgb, f, 0.55), 1.0);
+}`,
+
+  'motion-ghost': `#version 300 es${FS_COMMON}
+uniform sampler2D uTex2;
+void main() {
+  vec2 drift = vec2(sin(uT * 2.3) * 10.0 / uRes.x, 0.0);
+  vec3 c = texture(uTex, vUV).rgb + texture(uTex2, clamp(vUV + drift, 0.0, 1.0)).rgb * 0.32;
+  outColor = vec4(c, 1.0);
+}`,
+
+  droste: `#version 300 es${FS_COMMON}
+uniform sampler2D uTex2;
+void main() {
+  vec3 c = texture(uTex, vUV).rgb;
+  vec2 d = (vUV - 0.5) / 0.62 + 0.5;                    // last frame nested in
+  if (all(greaterThanEqual(d, vec2(0.0))) && all(lessThanEqual(d, vec2(1.0)))) {
+    c = mix(c, texture(uTex2, d).rgb, 0.92);
+  }
+  outColor = vec4(c, 1.0);
+}`,
+
+  'strobe-black': `#version 300 es${FS_COMMON}
+uniform float uStrobe;
+void main() {
+  outColor = vec4(texture(uTex, vUV).rgb * (1.0 - uStrobe), 1.0);
+}`,
+
+  'interlace-roll': `#version 300 es${FS_COMMON}
+void main() {
+  float bh = 8.0;
+  float band = mod(vUV.y * uRes.y - mod(uT * 90.0, bh * 2.0), bh * 2.0);
+  vec3 c = texture(uTex, vUV).rgb;
+  if (band < bh) {                                      // every other band, torn
+    float j = (5.0 + sin(uT * 3.1) * 4.0) / uRes.x;
+    vec3 torn = texture(uTex, clamp(vUV - vec2(j, 0.0), 0.0, 1.0)).rgb;
+    c = mix(c, torn, 0.85);
+  }
+  outColor = vec4(c, 1.0);
+}`,
+
+  freeze: `#version 300 es${FS_COMMON}
+void main() { outColor = vec4(texture(uTex, vUV).rgb, 1.0); }`,
+
+  'stutter-loop': `#version 300 es${FS_COMMON}
+uniform sampler2D uTex2;
+void main() {
+  outColor = vec4(mix(texture(uTex, vUV).rgb, texture(uTex2, vUV).rgb, 0.9), 1.0);
+}`,
+
+  // ── overlay: all eight screen-space effects in one pass; zero-valued
+  // uniforms are no-ops so the fold costs one draw however many are live ──
+  overlay: `#version 300 es${FS_COMMON}
+uniform float uGlow, uScanlines, uVhs, uGrain, uVignette, uLetterbox, uStarburst, uShockwave;
+uniform sampler2D uNoise;
+void main() {
+  vec2 uv = vUV;
+  float yTop = (1.0 - vUV.y) * uRes.y;
+  // vhs band: rolling bright band, torn sideways, noisy
+  float bandY = mod(uT * 140.0, uRes.y + 120.0) - 60.0;
+  float inBand = uVhs * step(bandY, yTop) * step(yTop, bandY + 26.0);
+  if (inBand > 0.5) {
+    uv.x += (texture(uNoise, vec2(uT * 0.7, bandY / 128.0)).r - 0.5) * 18.0 / uRes.x;
+  }
+  vec3 c = texture(uTex, clamp(uv, 0.0, 1.0)).rgb;
+  if (inBand > 0.5) {
+    c += 0.1 * vec3(0.81, 0.92, 1.0);
+    c += texture(uNoise, vec2(vUV.x * uRes.x, mod(uT * 700.0, 100.0)) / 128.0).r * 0.2;
+  }
+  c += (texture(uNoise, vUV * uRes / 128.0 + vec2(uT * 9.7, uT * 5.3)).r) * uGrain * 0.6;
+  c *= 1.0 - uScanlines * 0.5 * step(2.0, mod(yTop, 4.0));
+  // edge glow rides the treble, hue drifting like the 2D border
+  float edge = min(min(vUV.x, 1.0 - vUV.x) * uRes.x, min(vUV.y, 1.0 - vUV.y) * uRes.y);
+  c += (0.5 + 0.5 * cos(uT * 0.9 + vec3(0.0, 2.1, 4.2))) * uGlow * smoothstep(26.0, 0.0, edge);
+  float m2 = min(uRes.x, uRes.y);
+  float r = length((vUV - 0.5) * uRes) / m2;
+  if (uVignette > 0.001) {
+    c *= 1.0 - smoothstep(0.62 - uVignette * 0.25, 0.95, r) * (0.55 + uVignette * 0.4);
+  }
+  if (uStarburst > 0.001) {
+    float a = atan((vUV.y - 0.5) * uRes.y, (vUV.x - 0.5) * uRes.x);
+    float rays = pow(abs(cos(a * 6.0 + uT * 0.35)), 48.0);
+    float reach = smoothstep(0.08 + uStarburst * 0.55, 0.04, r);
+    c += vec3(0.92, 1.0, 1.0) * uStarburst * rays * reach * smoothstep(0.02, 0.06, r);
+  }
+  if (uShockwave > 0.001) {
+    float R = 0.04 + (1.0 - uShockwave) * 0.65;       // expands as it fades
+    float ring = exp(-pow((r - R) * m2 / (3.0 + uShockwave * 9.0), 2.0));
+    c += vec3(0.59, 0.94, 1.0) * uShockwave * ring;
+  }
+  float bh = 0.13 * uLetterbox;
+  if (vUV.y < bh || vUV.y > 1.0 - bh) c = vec3(0.0);
+  outColor = vec4(c, 1.0);
+}`,
+
+  // demo-scene background: the old radial gradient, now a quad pass
+  demobg: `#version 300 es${FS_COMMON}
+void main() {
+  float m2 = min(uRes.x, uRes.y);
+  float r = length((vUV - 0.5) * uRes) / (m2 * 0.75);
+  outColor = vec4(mix(vec3(0.043, 0.016, 0.094), vec3(0.0), clamp(r, 0.0, 1.0)), 1.0);
+}`,
+};
+
+// ── sprite layer: instanced quads over the finished frame ──
+// instance stride 10 floats: cx, cy, w, h, rot, r, g, b, alpha, cell
+const SPRITE_VS = `#version 300 es
+layout(location=0) in vec2 aCorner;
+layout(location=1) in vec4 aPosSize;
+layout(location=2) in float aRot;
+layout(location=3) in vec4 aColorA;
+layout(location=4) in float aCell;
+uniform vec2 uRes;
+uniform float uCells;
+out vec2 vCellUV; out vec4 vColor;
+void main() {
+  vec2 corner = aCorner * 0.5;
+  float cr = cos(aRot), sr = sin(aRot);
+  vec2 off = vec2(corner.x * aPosSize.z, corner.y * aPosSize.w);
+  off = vec2(off.x * cr - off.y * sr, off.x * sr + off.y * cr);
+  vec2 px = aPosSize.xy + off;
+  gl_Position = vec4(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0, 0.0, 1.0);
+  vCellUV = vec2((aCell + corner.x + 0.5) / uCells, corner.y + 0.5);
+  vColor = aColorA;
+}`;
+const SPRITE_FS = `#version 300 es
+precision highp float;
+in vec2 vCellUV; in vec4 vColor; out vec4 outColor;
+uniform sampler2D uAtlas;
+void main() {
+  float a = texture(uAtlas, vCellUV).a;
+  outColor = vec4(vColor.rgb * a * vColor.a, vColor.a * a);   // premultiplied
+}`;
+
+const LINE_VS = `#version 300 es
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec4 aColor;
+uniform vec2 uRes;
+out vec4 vColor;
+void main() {
+  gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, 0.0, 1.0);
+  vColor = aColor;
+}`;
+const LINE_FS = `#version 300 es
+precision highp float;
+in vec4 vColor; out vec4 outColor;
+void main() { outColor = vColor; }`;
+
+// sprite atlas — rasterized ONCE at startup (generation-only 2D canvas,
+// per design.md); cells: 0 soft circle, 1 solid rect, 2 soft bar, 3+ glyphs
+const ATLAS_CELLS = 3 + GLYPH_SET.length, ATLAS_CELL = 64;
+const atlasCv = document.createElement('canvas');
+atlasCv.width = ATLAS_CELLS * ATLAS_CELL;
+atlasCv.height = ATLAS_CELL;
+{
+  const a = atlasCv.getContext('2d');
+  const g0 = a.createRadialGradient(32, 32, 0, 32, 32, 30);
+  g0.addColorStop(0, 'rgba(255,255,255,1)');
+  g0.addColorStop(0.35, 'rgba(255,255,255,.85)');
+  g0.addColorStop(1, 'rgba(255,255,255,0)');
+  a.fillStyle = g0;
+  a.fillRect(0, 0, 64, 64);
+  a.fillStyle = '#fff';
+  a.fillRect(64 + 4, 4, 56, 56);
+  const g2 = a.createLinearGradient(0, 20, 0, 44);
+  g2.addColorStop(0, 'rgba(255,255,255,0)');
+  g2.addColorStop(0.5, 'rgba(255,255,255,1)');
+  g2.addColorStop(1, 'rgba(255,255,255,0)');
+  a.fillStyle = g2;
+  a.fillRect(130, 20, 60, 24);
+  a.font = '48px ui-monospace, Menlo, Consolas, monospace';
+  a.textAlign = 'center';
+  a.textBaseline = 'middle';
+  a.fillStyle = '#fff';
+  for (let i = 0; i < GLYPH_SET.length; i++) {
+    a.fillText(GLYPH_SET[i], (3 + i) * 64 + 32, 34);
+  }
+}
+
+const IDENTITY3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+let gl = null, glLost = false;
+const glPrograms = new Map();
+let quadVao = null, srcTex = null, pingT = null, pongT = null, glNoiseTex = null;
+let srcT = null, glAtlasTex = null, spriteVao = null, spriteVB = null;
+let lineVao = null, lineVB = null;
+
+function compileProgram(vsSrc, fsSrc, label) {
+  const sh = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw new Error(`${label}: ${gl.getShaderInfoLog(s)}`);
+    }
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error(`${label}: ${gl.getProgramInfoLog(p)}`);
+  }
+  return p;
+}
+const glProgram = key => {
+  if (!glPrograms.has(key)) {
+    glPrograms.set(key, SHADERS[key] ? compileProgram(QUAD_VS, SHADERS[key], key) : null);
+  }
+  return glPrograms.get(key);
+};
+const glProgramRaw = (key, vs, fs) => {
+  if (!glPrograms.has(key)) glPrograms.set(key, compileProgram(vs, fs, key));
+  return glPrograms.get(key);
+};
+
+function mkTex() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function mkTarget() {
+  const tex = mkTex();
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex, fbo };
+}
+
+// temporal state textures: per-effect feedback + the frame ring
+const FEEDBACK_IDS = new Set(['echo-trails', 'time-smear', 'motion-ghost', 'droste']);
+const glFeedback = new Map();
+function glSizedTex() {
+  const t = mkTex();
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  return t;
+}
+const feedbackTex = id => {
+  if (!glFeedback.has(id)) glFeedback.set(id, glSizedTex());
+  return glFeedback.get(id);
+};
+function dropGlTemporal(deleteTex) {
+  if (deleteTex && gl) {
+    for (const t of glFeedback.values()) gl.deleteTexture(t);
+    if (ring) for (const t of ring) if (t) gl.deleteTexture(t);
+  }
+  glFeedback.clear();
+  ring = null; ringHead = -1; ringFill = 0;
+}
+
+function glInit() {
+  gl = canvas.getContext('webgl2', { alpha: false, antialias: false });
+  if (!gl) {
+    document.getElementById('nogl').classList.add('show');
+    return false;
+  }
+  glPrograms.clear();
+  dropGlTemporal(false);    // context objects are gone — forget, don't delete
+  quadVao = gl.createVertexArray();
+  gl.bindVertexArray(quadVao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  srcTex = mkTex();
+  // static noise tile, uploaded once, tiling — feeds the overlay pass
+  glNoiseTex = mkTex();
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, noiseCv);
+  // sprite atlas, uploaded once
+  glAtlasTex = mkTex();
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlasCv);
+  // sprite VAO: shared quad corners + one interleaved instance buffer
+  spriteVao = gl.createVertexArray();
+  gl.bindVertexArray(spriteVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  spriteVB = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, spriteVB);
+  const S = 40;   // 10 floats per instance
+  for (const [loc, size, off] of [[1, 4, 0], [2, 1, 16], [3, 4, 20], [4, 1, 36]]) {
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, S, off);
+    gl.vertexAttribDivisor(loc, 1);
+  }
+  // line VAO: interleaved x, y, r, g, b, a
+  lineVao = gl.createVertexArray();
+  gl.bindVertexArray(lineVao);
+  lineVB = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineVB);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 24, 8);
+  glSizeDirty = true;
+  return true;
+}
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); glLost = true; });
+canvas.addEventListener('webglcontextrestored', () => { glLost = false; glInit(); });
+
+function setUniforms(prog, uniforms) {
+  for (const [name, v] of Object.entries(uniforms)) {
+    const loc = gl.getUniformLocation(prog, 'u' + name[0].toUpperCase() + name.slice(1));
+    if (loc === null) continue;
+    if (Array.isArray(v)) {
+      if (v.length === 9) gl.uniformMatrix3fv(loc, false, v);
+      else if (v.length === 2) gl.uniform2fv(loc, v);
+      else gl.uniform1fv(loc, v);
+    } else gl.uniform1f(loc, v);
+  }
+}
+
+// Execute the pass plan: source texture → ping-pong chain → screen.
+// Video mode uploads the element straight to GL (letterboxing happens in
+// srcTexAt via uFit); demo mode renders the scene into the srcT target.
+// Either way, the chain's passes run at canvas resolution.
+function glRender(plan, tSec, nowMs) {
+  if (!gl || glLost || gl.isContextLost()) return;
+  if (glSizeDirty) {
+    for (const t of [pingT, pongT, srcT]) {
+      if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); }
+    }
+    pingT = mkTarget(); pongT = mkTarget(); srcT = mkTarget();
+    glSizeDirty = false;
+  }
+  let readTex, fit = [1, 1];
+  if (mode === 'video' && video.readyState >= 2 && video.videoWidth) {
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    const sc = Math.min(W / video.videoWidth, H / video.videoHeight);
+    fit = [W / (video.videoWidth * sc), H / (video.videoHeight * sc)];
+    readTex = srcTex;
+  } else {
+    glDemoScene(tSec);
+    readTex = srcT.tex;
+  }
+  const passes = plan.filter(p => SHADERS[p.program]);
+  gl.bindVertexArray(quadVao);
+  gl.viewport(0, 0, W, H);
+  passes.forEach((pass, i) => {
+    const target = i === passes.length - 1 ? null : (readTex === pingT?.tex ? pongT : pingT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    const prog = glProgram(pass.program);
+    gl.useProgram(prog);
+    gl.activeTexture(gl.TEXTURE0);
+    // the frozen collapse reads the held ring frame instead of the chain
+    const read = pass.id === 'freeze-frame' ? (ring?.[ringHead] ?? readTex) : readTex;
+    gl.bindTexture(gl.TEXTURE_2D, read);
+    gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
+    const mLoc = gl.getUniformLocation(prog, 'uMatrix');
+    if (mLoc) gl.uniformMatrix3fv(mLoc, false, pass.uniforms.matrix ?? IDENTITY3);
+    const rLoc = gl.getUniformLocation(prog, 'uRes');
+    if (rLoc) gl.uniform2f(rLoc, W, H);
+    const tLoc = gl.getUniformLocation(prog, 'uT');
+    if (tLoc) gl.uniform1f(tLoc, tSec ?? 0);
+    const fLoc = gl.getUniformLocation(prog, 'uFit');
+    if (fLoc) {            // only the first pass letterboxes the raw source
+      gl.uniform2f(fLoc, i === 0 ? fit[0] : 1, i === 0 ? fit[1] : 1);
+    }
+    setUniforms(prog, pass.uniforms);
+    // second sampler: per-effect feedback, or the ring frame to replay
+    let tex2 = null;
+    if (FEEDBACK_IDS.has(pass.id)) tex2 = feedbackTex(pass.id);
+    else if (pass.id === 'stutter-loop') {
+      tex2 = ring?.[ringIndex(ringHead, pass.uniforms.back, RING_SIZE)] ?? read;
+    }
+    if (tex2) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, tex2);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uTex2'), 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    if (pass.id === 'overlay') {
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, glNoiseTex);
+      gl.uniform1i(gl.getUniformLocation(prog, 'uNoise'), 2);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    // capture this pass's output for next frame (ghost on a 120 ms cadence)
+    if (FEEDBACK_IDS.has(pass.id)
+        && (pass.id !== 'motion-ghost' || nowMs - ghStamp > 120)) {
+      gl.bindTexture(gl.TEXTURE_2D, feedbackTex(pass.id));
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, W, H);
+      if (pass.id === 'motion-ghost') ghStamp = nowMs;
+    }
+    if (target) readTex = target.tex;
+  });
+  // frame ring — capture the finished frame while freeze/stutter live;
+  // capture pauses during the hold, exactly like the 2D ring
+  if (A('freeze-frame') || A('stutter-loop')) {
+    if (!ring) { ring = new Array(RING_SIZE).fill(null); ringHead = -1; ringFill = 0; }
+    if (!(A('freeze-frame') && nowMs < freezeUntil)) {
+      ringHead = (ringHead + 1) % RING_SIZE;
+      const tex = ring[ringHead] ?? (ring[ringHead] = glSizedTex());
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, W, H);
+      ringFill = Math.min(RING_SIZE, ringFill + 1);
+    }
+  } else if (ring) {
+    for (const t of ring) if (t) gl.deleteTexture(t);
+    ring = null; ringFill = 0;
+  }
+}
+
+// Instanced sprite draw: `norm` with premultiplied alpha (confetti),
+// `add` additive (the 2D 'lighter' group). fbo null → over the screen.
+function glSprites(add, norm, fbo = null) {
+  if (!add.length && !norm.length) return;
+  const prog = glProgramRaw('_sprite', SPRITE_VS, SPRITE_FS);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(prog);
+  gl.uniform2f(gl.getUniformLocation(prog, 'uRes'), W, H);
+  gl.uniform1f(gl.getUniformLocation(prog, 'uCells'), ATLAS_CELLS);
+  gl.activeTexture(gl.TEXTURE3);
+  gl.bindTexture(gl.TEXTURE_2D, glAtlasTex);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uAtlas'), 3);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindVertexArray(spriteVao);
+  gl.enable(gl.BLEND);
+  const group = (arr, sf, df) => {
+    if (!arr.length) return;
+    gl.blendFunc(sf, df);
+    gl.bindBuffer(gl.ARRAY_BUFFER, spriteVB);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.DYNAMIC_DRAW);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, arr.length / 10);
+  };
+  group(norm, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  group(add, gl.ONE, gl.ONE);
+  gl.disable(gl.BLEND);
+}
+
+// Demo scene, all-GL: gradient quad + spectrum bars as glow sprites +
+// prism wireframe as additive lines — rendered into srcT for the chain.
+function glDemoScene(t) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, srcT.fbo);
+  gl.viewport(0, 0, W, H);
+  const bg = glProgram('demobg');
+  gl.useProgram(bg);
+  gl.uniformMatrix3fv(gl.getUniformLocation(bg, 'uMatrix'), false, IDENTITY3);
+  gl.uniform2f(gl.getUniformLocation(bg, 'uRes'), W, H);
+  gl.bindVertexArray(quadVao);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  const m = Math.min(W, H), cx = W / 2, cy = H / 2;
+  const bars = [];
+  const N = 96, R = m * 0.26;
+  for (let i = 0; i < N; i++) {
+    const v = spectrum ? spectrum[2 + Math.floor(Math.pow(i / N, 1.8) * 360)] / 255 : 0;
+    const ang = (i / N) * TAU + t * 0.12;
+    const len = Math.pow(v, 1.4) * m * 0.22 + 2;
+    const [r, g, b] = hslToRgb(((i / N) * 360 + t * 24) % 360, 1, 0.62);
+    const mid = R + len / 2;
+    bars.push(cx + Math.cos(ang) * mid, cy + Math.sin(ang) * mid,
+              len + 6, 8, ang, r, g, b, 0.75, 2);
+  }
+  const core = (3 + bassS * m * 0.03) * 6;          // glowing core follows the bass
+  bars.push(cx, cy, core, core, 0, 1, 1, 1, 1, 0);
+  glSprites(bars, [], srcT.fbo);
+
+  // rotating triangular prism wireframe (same projection as the 2D scene)
+  const s = m * (0.13 + 0.05 * bassS + 0.04 * pulses.zoom);
+  const ry = t * 0.5, rx = 0.45 + Math.sin(t * 0.21) * 0.3;
+  const pts = [];
+  for (const z of [-0.62, 0.62]) {
+    for (let i = 0; i < 3; i++) {
+      const a = ry * 0.55 + i * TAU / 3;
+      const x = Math.cos(a), y = Math.sin(a) * 1.12;
+      const y2 = y * Math.cos(rx) - z * Math.sin(rx);
+      const z2 = y * Math.sin(rx) + z * Math.cos(rx);
+      const x2 = x * Math.cos(ry) + z2 * Math.sin(ry);
+      const z3 = -x * Math.sin(ry) + z2 * Math.cos(ry);
+      const pr = 3 / (3 + z3);
+      pts.push([cx + x2 * pr * s, cy + y2 * pr * s]);
+    }
+  }
+  const edges = [[0, 1], [1, 2], [2, 0], [3, 4], [4, 5], [5, 3], [0, 3], [1, 4], [2, 5]];
+  const [lr, lg, lb] = hslToRgb((t * 40) % 360, 1, 0.68);
+  const verts = [];
+  for (const [a, b] of edges) {
+    verts.push(pts[a][0], pts[a][1], lr, lg, lb, 1,
+               pts[b][0], pts[b][1], lr, lg, lb, 1);
+  }
+  const lp = glProgramRaw('_line', LINE_VS, LINE_FS);
+  gl.useProgram(lp);
+  gl.uniform2f(gl.getUniformLocation(lp, 'uRes'), W, H);
+  gl.bindVertexArray(lineVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineVB);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.LINES, 0, verts.length / 6);
+  gl.disable(gl.BLEND);
+}
+glInit();
+
+// Scene-element simulation (positions/ages) — extracted from the old 2D
+// draw functions so spawned elements keep aging out while the GL sprite
+// layer is pending (slice 8 draws them).
+function ageScene(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.age += dt;
+    if (p.age >= p.life || !A(p.kind)) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.kind === 'confetti') {
+      p.vy += 420 * dt;
+      p.vx += Math.sin((p.age + p.rot) * 9) * 26 * dt;
+      p.rot += p.vr * dt;
+    } else { p.vx *= 0.985; p.vy *= 0.985; }
+  }
+  for (let i = bolts.length - 1; i >= 0; i--) {
+    if ((bolts[i].age += dt) >= bolts[i].life) bolts.splice(i, 1);
+  }
+  for (let i = glyphs.length - 1; i >= 0; i--) {
+    if ((glyphs[i].age += dt) >= glyphs[i].life) glyphs.splice(i, 1);
+  }
+}
+
+// ---------- fps diagnostics ----------
+// Pacing truth is the rAF delta: every frame's duration lands in a sliding
+// window summarized by frameStats (pure, tested). The draw timer measures
+// JS submission cost only — canvas work the GPU finishes later is invisible
+// to it, which is exactly why drops are counted from rAF deltas instead.
+const perfEl = document.getElementById('perf');
+const PERF_WINDOW = 180;       // 3 s of frames at 60 fps
+const PERF_GAP_MS = 250;       // a rAF gap this long is a tab switch, not a frame
+let perfOn = false, perfStats = null, perfNext = 0;
+let frameDurs = [], dropTotal = 0, drawMsS = 0;
+
+function resetPerf() { frameDurs = []; dropTotal = 0; perfStats = null; }
+
+function perfTick(durMs, drawMs, nowMs) {
+  if (durMs > 0 && durMs <= PERF_GAP_MS) {
+    frameDurs.push(durMs);
+    if (frameDurs.length > PERF_WINDOW) frameDurs.shift();
+    dropTotal += missedVsync(durMs, perfStats?.baseMs ?? 0);
+  }
+  drawMsS += (drawMs - drawMsS) * 0.1;
+  if (nowMs < perfNext) return;
+  perfNext = nowMs + 250;                  // stats always fresh, DOM 4×/s
+  perfStats = frameStats(frameDurs);
+  if (perfOn) renderPerf();
+}
+
+function renderPerf() {
+  const s = perfStats;
+  if (!s) return;
+  const hz = s.baseMs ? Math.round(1000 / s.baseMs) : null;
+  const cls = !hz || s.fps >= hz * 0.95 ? 'good' : s.fps >= hz * 0.8 ? 'warn' : 'bad';
+  const winSec = frameDurs.length ? (frameDurs.length * s.avgMs / 1000).toFixed(1) : '0';
+  const srcLine = mode === 'video' && video.videoWidth
+    ? `src  ${video.videoWidth}×${video.videoHeight} → ${W}×${H}`
+    : `src  demo → ${W}×${H}`;
+  perfEl.innerHTML =
+    `fps  <span class="${cls}">${s.fps.toFixed(1)}</span>${hz ? ` / ${hz}` : ''}\n` +
+    `t    ${s.avgMs.toFixed(1)} avg · ${s.p95Ms.toFixed(1)} p95 · ${s.maxMs.toFixed(1)} max ms\n` +
+    `draw ${drawMsS.toFixed(1)} ms js\n` +
+    `drop ${s.dropped} / ${winSec}s · ${dropTotal} total\n` +
+    srcLine;
+}
+
+function togglePerf() {
+  perfOn = !perfOn;
+  perfEl.classList.toggle('show', perfOn);
+  if (perfOn) renderPerf();
+  toast(perfOn ? 'fps diagnostics on' : 'fps diagnostics off');
+}
+
 // ---------- main loop ----------
 let last = 0;
+let lastPlan = null, lastPlanT = 0, lastPlanMs = 0;   // for save-png redraw
 function frame(ms) {
-  const dt = Math.min(0.05, (ms - last) / 1000 || 0.016);
+  const rawDt = ms - last;       // unclamped — diagnostics see real pacing
+  const dt = Math.min(0.05, rawDt / 1000 || 0.016);
   last = ms;
   frameNo++;
   if (AC && analyser) detect(ms);
@@ -1552,8 +2091,30 @@ function frame(ms) {
     for (const ev of gridEvents(grid, prevFrameMs, ms)) fireBeat(ev.timeMs);
   }
   prevFrameMs = ms;
-  drawSource(ms / 1000);
-  render(ms / 1000, dt, ms);
+  const t0 = performance.now();
+  ageScene(dt);
+  // letterbox easing lived in the 2D render; the plan consumes the position
+  lbPos += ((A('letterbox-snap') && lbOpen ? 1 : 0) - lbPos) * Math.min(1, dt * 14);
+  const shakeAmt = A('shake') && pulses.shake > 0.02 ? pulses.shake * 13 : 0;
+  const shakeAng = rand(0, TAU);
+  const plan = buildPassPlan({
+    active: activeSet, pulses, bass: bassS, treble: trebleS, tSec: ms / 1000,
+    hueBase, joltDir, sliceSeed, frameNo,
+    shake: [Math.cos(shakeAng) * shakeAmt / (W / 2), Math.sin(shakeAng) * shakeAmt / (H / 2)],
+    scheduled: { mirrorOn, tileN, lbOpen, lbPos,
+                 frozen: ms < freezeUntil && A('freeze-frame') && ringFill > 0,
+                 stutterBack: ringFill >= 6 ? 1 + ((ms / 50) | 0) % 5 : 0 },
+  });
+  lastPlan = plan; lastPlanT = ms / 1000; lastPlanMs = ms;
+  glRender(plan, ms / 1000, ms);
+  if (gl && !glLost) {
+    const sp = packSprites(particles, bolts, glyphs);
+    glSprites(sp.add, sp.norm);
+  }
+  for (const key of Object.keys(pulses)) {
+    pulses[key] = decayPulse(pulses[key], dt * 1000, HALF_LIFE[key] ?? 150);
+  }
+  perfTick(rawDt, performance.now() - t0, ms);
   bpmEl.textContent = bpm === null ? '—' : Math.round(bpm);
   if (mode === 'video') {
     timeEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
