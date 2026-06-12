@@ -587,8 +587,8 @@ function geometryMatrix({ pulses, active, joltDir, mirrorOn, shake }) {
 
 // Ordered pass list from frame state. Pure and deterministic — registry
 // order within each section. input: { active: Set<id>, pulses: {id→0..1},
-// bass, treble: 0..1, tSec, hueBase, joltDir, shake: [x,y], scheduled:
-// { mirrorOn, tileN, lbOpen, lbPos, frozen, stutterBack } }.
+// bass, treble: 0..1, tSec, hueBase, joltDir, sliceSeed, shake: [x,y],
+// scheduled: { mirrorOn, tileN, lbOpen, lbPos, frozen, stutterBack } }.
 // Returns [{ id, program, uniforms, members? }].
 function buildPassPlan(input) {
   const live = id => {
@@ -607,8 +607,27 @@ function buildPassPlan(input) {
     pulses: input.pulses, active: input.active, joltDir: input.joltDir ?? 1,
     mirrorOn: input.scheduled?.mirrorOn ?? false, shake: input.shake ?? [0, 0],
   });
+  // base pass variant: geometry *replacements* are program forks (same
+  // priority chain as the 2D pipeline); pixelate is a UV-quantize uniform
+  // that rides whichever variant won.
+  const P = id => input.pulses[id] ?? 0;
+  const base = { id: 'base', program: 'base', uniforms: { matrix } };
+  base.uniforms.block = live('pixelate') ? 3 + P('pixelate') * 26 : 0;
+  if (live('kaleidoscope')) {
+    base.program = 'kaleido';
+    base.uniforms.wedges = 8;
+  } else if (live('tile-grid')) {
+    base.program = 'tile';
+    base.uniforms.tiles = input.scheduled?.tileN ?? 2;
+  } else if (live('slice-glitch')) {
+    base.program = 'slice';
+    base.uniforms.offsets = sliceOffsets(input.sliceSeed ?? 1, 14, 70 * P('slice-glitch'));
+  } else if (live('v-slice')) {
+    base.program = 'vslice';
+    base.uniforms.offsets = sliceOffsets((input.sliceSeed ?? 1) + 1, 14, 70 * P('v-slice'));
+  }
   return [
-    { id: 'base', program: 'base', uniforms: { matrix } },
+    base,
     ...fold('color', COLOR_FOLD, members => colorFoldUniforms(members, input.pulses,
         { bass: input.bass, treble: input.treble, tSec: input.tSec, hueBase: input.hueBase ?? 0 })),
     ...solo(colorHeavy),
@@ -1771,12 +1790,64 @@ void main() {
   gl_Position = vec4(p.xy, 0.0, 1.0);
 }`;
 
-const SHADERS = {
-  base: `#version 300 es
+// Shared fragment preamble: every pass gets resolution, time, and the
+// pixelate UV-quantizer (uBlock = 0 → off) so pixelate rides any variant.
+const FS_COMMON = `
 precision highp float;
 in vec2 vUV; out vec4 outColor;
 uniform sampler2D uTex;
-void main() { outColor = vec4(texture(uTex, vUV).rgb, 1.0); }`,
+uniform vec2 uRes;
+uniform float uT;
+uniform float uBlock;
+const float TAU = 6.28318530718;
+vec2 pixelUV(vec2 uv) {
+  if (uBlock < 0.5) return uv;
+  vec2 g = uRes / uBlock;
+  return (floor(uv * g) + 0.5) / g;
+}`;
+
+const SHADERS = {
+  base: `#version 300 es${FS_COMMON}
+void main() { outColor = vec4(texture(uTex, pixelUV(vUV)).rgb, 1.0); }`,
+
+  // true polar kaleidoscope — aspect-corrected, mirrored alternate wedges,
+  // slow drift (GL-native upgrade over the 2D clipped-wedge approximation)
+  kaleido: `#version 300 es${FS_COMMON}
+uniform float uWedges;
+void main() {
+  vec2 c = vUV - 0.5;
+  c.x *= uRes.x / uRes.y;
+  float r = length(c);
+  float a = atan(c.y, c.x) + uT * 0.11;
+  float w = TAU / uWedges;
+  a = mod(a, w * 2.0);
+  a = abs(a - w);
+  vec2 uv = vec2(cos(a), sin(a)) * r;
+  uv.x *= uRes.y / uRes.x;
+  outColor = vec4(texture(uTex, pixelUV(clamp(uv + 0.5, 0.0, 1.0))).rgb, 1.0);
+}`,
+
+  tile: `#version 300 es${FS_COMMON}
+uniform float uTiles;
+void main() { outColor = vec4(texture(uTex, pixelUV(fract(vUV * uTiles))).rgb, 1.0); }`,
+
+  slice: `#version 300 es${FS_COMMON}
+uniform float uOffsets[14];
+void main() {
+  int i = int(floor((1.0 - vUV.y) * 14.0));
+  vec2 uv = vUV;
+  uv.x -= uOffsets[clamp(i, 0, 13)] / uRes.x;
+  outColor = vec4(texture(uTex, pixelUV(clamp(uv, 0.0, 1.0))).rgb, 1.0);
+}`,
+
+  vslice: `#version 300 es${FS_COMMON}
+uniform float uOffsets[14];
+void main() {
+  int i = int(floor(vUV.x * 14.0));
+  vec2 uv = vUV;
+  uv.y += uOffsets[clamp(i, 0, 13)] / uRes.y;
+  outColor = vec4(texture(uTex, pixelUV(clamp(uv, 0.0, 1.0))).rgb, 1.0);
+}`,
 };
 
 const IDENTITY3 = [1, 0, 0, 0, 1, 0, 0, 0, 1];
@@ -1865,7 +1936,7 @@ function setUniforms(prog, uniforms) {
 // Execute the pass plan: source texture → ping-pong chain → screen.
 // The src 2D canvas (video letterbox or demo scene) is the upload source;
 // the video never hits GL at full 4K — passes run at canvas resolution.
-function glRender(plan) {
+function glRender(plan, tSec) {
   if (!gl || glLost || gl.isContextLost()) return;
   if (glSizeDirty) {
     for (const t of [pingT, pongT]) {
@@ -1891,6 +1962,10 @@ function glRender(plan) {
     gl.uniform1i(gl.getUniformLocation(prog, 'uTex'), 0);
     const mLoc = gl.getUniformLocation(prog, 'uMatrix');
     if (mLoc) gl.uniformMatrix3fv(mLoc, false, pass.uniforms.matrix ?? IDENTITY3);
+    const rLoc = gl.getUniformLocation(prog, 'uRes');
+    if (rLoc) gl.uniform2f(rLoc, W, H);
+    const tLoc = gl.getUniformLocation(prog, 'uT');
+    if (tLoc) gl.uniform1f(tLoc, tSec ?? 0);
     setUniforms(prog, pass.uniforms);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1997,12 +2072,12 @@ function frame(ms) {
   const shakeAng = rand(0, TAU);
   const plan = buildPassPlan({
     active: activeSet, pulses, bass: bassS, treble: trebleS, tSec: ms / 1000,
-    hueBase, joltDir,
+    hueBase, joltDir, sliceSeed,
     shake: [Math.cos(shakeAng) * shakeAmt / (W / 2), Math.sin(shakeAng) * shakeAmt / (H / 2)],
     scheduled: { mirrorOn, tileN, lbOpen, lbPos,
                  frozen: ms < freezeUntil && A('freeze-frame'), stutterBack: 0 },
   });
-  glRender(plan);
+  glRender(plan, ms / 1000);
   for (const key of Object.keys(pulses)) {
     pulses[key] = decayPulse(pulses[key], dt * 1000, HALF_LIFE[key] ?? 150);
   }

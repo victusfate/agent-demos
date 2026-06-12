@@ -25,3 +25,11 @@
   decay moved into the frame loop. 2D draw functions are dead code until
   slice 9; `s` save-PNG temporarily unreliable (GL buffer not preserved)
   — fixed in slice 9. Added an app-script parse test. 97 green.
+
+## Slice 4 — non-affine geometry programs
+- Status: done
+- Notes: base pass forks by program (kaleido/tile/slice/vslice, 2D
+  priority chain); pixelate is a `uBlock` UV-quantizer in FS_COMMON and
+  rides any variant. Kaleidoscope upgraded to true aspect-corrected polar
+  mirroring (per the color/perceptual emphasis). `sliceSeed` joined the
+  plan input. glRender now feeds frame-global uRes/uT. 101 green.
