@@ -113,6 +113,18 @@
   #seek { width: min(34vw, 320px); accent-color: var(--cyn); }
   #time { color: #fff; }
 
+  #perf {
+    position: fixed; top: 14px; left: 16px; z-index: 2; display: none;
+    padding: 8px 12px; border-radius: 10px; white-space: pre; pointer-events: none;
+    font-family: ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+    font-size: .72rem; line-height: 1.55; letter-spacing: .06em; color: #bfeaff;
+    background: rgba(4,2,12,.78); border: 1px solid rgba(143,91,255,.45);
+    box-shadow: 0 0 24px rgba(143,91,255,.25); backdrop-filter: blur(8px);
+  }
+  #perf.show { display: block; }
+  #perf .good { color: var(--cyn); text-shadow: 0 0 8px var(--cyn); }
+  #perf .warn { color: #ffd24a; text-shadow: 0 0 8px rgba(255,210,74,.7); }
+  #perf .bad  { color: var(--mag); text-shadow: 0 0 8px var(--mag); }
   #hint {
     position: fixed; bottom: 16px; right: 18px; z-index: 2; pointer-events: none;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .7rem;
@@ -139,7 +151,7 @@
   <h1>beat-prism</h1>
   <p>drop a video — or click to hear the demo</p>
   <p>beats are predicted live; 46 effects fire with the music</p>
-  <p class="keys">space play/pause &nbsp; d demo &nbsp; e effects &nbsp; r shuffle &nbsp; s save png</p>
+  <p class="keys">space play/pause &nbsp; d demo &nbsp; e effects &nbsp; r shuffle &nbsp; f fps &nbsp; s save png</p>
 </div>
 <div id="hud">
   <span class="bpm-box">BPM <span id="bpm">—</span><span id="beatdot"></span></span>
@@ -161,7 +173,8 @@
   <span id="time">0:00 / 0:00</span>
 </div>
 <div id="drawer"></div>
-<div id="hint">[space] play &nbsp; [d]emo &nbsp; [e]ffects &nbsp; [r] shuffle &nbsp; [s]ave</div>
+<div id="perf"></div>
+<div id="hint">[space] play &nbsp; [d]emo &nbsp; [e]ffects &nbsp; [r] shuffle &nbsp; [f]ps &nbsp; [s]ave</div>
 <div id="toast"></div>
 <div id="dropglow"></div>
 
@@ -455,6 +468,49 @@ function posterizeCurve(v, levels) {
 // Index of the frame `back` steps behind `head` in a ring of `size`.
 const ringIndex = (head, back, size) => (((head - back) % size) + size) % size;
 
+// ──────────────── fps diagnostics ────────────────
+
+// Standard display refresh periods. The best sustained frame interval
+// snaps to the nearest so missed-vsync math stays exact (16.9 → 16.67).
+const REFRESH_RATES_HZ = [240, 165, 144, 120, 90, 75, 60, 50, 30];
+function snapRefreshMs(intervalMs) {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return null;
+  let best = null, bestD = Infinity;
+  for (const hz of REFRESH_RATES_HZ) {
+    const p = 1000 / hz;
+    const d = Math.abs(p - intervalMs);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+// Vsync intervals a frame overshot: 2× the base period = 1 missed frame.
+// Rounding gives ~half-period tolerance for rAF timestamp jitter; no base
+// estimate yet (0/null) counts nothing rather than guessing.
+const missedVsync = (durMs, baseMs) =>
+  baseMs > 0 ? Math.max(0, Math.round(durMs / baseMs) - 1) : 0;
+
+// Summarize a window of frame durations (ms): fps from the mean, p95/max
+// spike sizes, the refresh base estimated from the 10th percentile (best
+// sustained pace — robust to one-off short frames), and how many vsyncs
+// the window missed against that base. Sustained half-rate therefore
+// reads as a lower base, not as a wall of drops. Pure.
+function frameStats(durations) {
+  if (!durations || !durations.length) {
+    return { fps: 0, avgMs: 0, p95Ms: 0, maxMs: 0, baseMs: null, dropped: 0 };
+  }
+  const sorted = [...durations].sort((a, b) => a - b);
+  const at = q => sorted[Math.floor(q * (sorted.length - 1))];
+  let sum = 0;
+  for (const d of durations) sum += d;
+  const avgMs = sum / durations.length;
+  const baseMs = snapRefreshMs(at(0.1));
+  let dropped = 0;
+  for (const d of durations) dropped += missedVsync(d, baseMs ?? 0);
+  return { fps: 1000 / avgMs, avgMs, p95Ms: at(0.95),
+           maxMs: sorted[sorted.length - 1], baseMs, dropped };
+}
+
 // m:ss readout for the transport bar; degenerate input shows 0:00.
 function formatTime(sec) {
   if (!Number.isFinite(sec) || sec < 0) return '0:00';
@@ -472,6 +528,7 @@ globalThis.__logic = {
   spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
   FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, dealHand,
   sliceOffsets, wedgeAngles, posterizeCurve, ringIndex, formatTime, seekTarget,
+  snapRefreshMs, missedVsync, frameStats,
 };
 })();
 </script>
@@ -480,7 +537,7 @@ globalThis.__logic = {
 const { spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
         FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, dealHand,
         sliceOffsets, wedgeAngles, posterizeCurve, ringIndex,
-        formatTime, seekTarget } = globalThis.__logic;
+        formatTime, seekTarget, missedVsync, frameStats } = globalThis.__logic;
 
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -676,6 +733,7 @@ function loadVideo(file) {
   video.src = objectUrl;
   mode = 'video';
   resetDetector();
+  resetPerf();        // drop totals are per-source
   syncTransport();
   video.play().catch(() => toast('press space to play'));
   toast(file.name);
@@ -687,6 +745,7 @@ function toDemo() {
   video.pause();
   mode = 'demo';
   resetDetector();
+  resetPerf();
   syncTransport();
   startDemo();
   toast('demo loop');
@@ -1521,6 +1580,8 @@ window.addEventListener('keydown', e => {
     toast('frame saved');
   } else if (e.key === 'r') {
     enableShuffle();
+  } else if (e.key === 'f') {
+    togglePerf();
   } else if (e.key === 'e') {
     drawerEl.classList.toggle('open');
   } else if (e.key === '0') {
@@ -1538,10 +1599,61 @@ window.addEventListener('keydown', e => {
   }
 });
 
+// ---------- fps diagnostics ----------
+// Pacing truth is the rAF delta: every frame's duration lands in a sliding
+// window summarized by frameStats (pure, tested). The draw timer measures
+// JS submission cost only — canvas work the GPU finishes later is invisible
+// to it, which is exactly why drops are counted from rAF deltas instead.
+const perfEl = document.getElementById('perf');
+const PERF_WINDOW = 180;       // 3 s of frames at 60 fps
+const PERF_GAP_MS = 250;       // a rAF gap this long is a tab switch, not a frame
+let perfOn = false, perfStats = null, perfNext = 0;
+let frameDurs = [], dropTotal = 0, drawMsS = 0;
+
+function resetPerf() { frameDurs = []; dropTotal = 0; perfStats = null; }
+
+function perfTick(durMs, drawMs, nowMs) {
+  if (durMs > 0 && durMs <= PERF_GAP_MS) {
+    frameDurs.push(durMs);
+    if (frameDurs.length > PERF_WINDOW) frameDurs.shift();
+    dropTotal += missedVsync(durMs, perfStats?.baseMs ?? 0);
+  }
+  drawMsS += (drawMs - drawMsS) * 0.1;
+  if (nowMs < perfNext) return;
+  perfNext = nowMs + 250;                  // stats always fresh, DOM 4×/s
+  perfStats = frameStats(frameDurs);
+  if (perfOn) renderPerf();
+}
+
+function renderPerf() {
+  const s = perfStats;
+  if (!s) return;
+  const hz = s.baseMs ? Math.round(1000 / s.baseMs) : null;
+  const cls = !hz || s.fps >= hz * 0.95 ? 'good' : s.fps >= hz * 0.8 ? 'warn' : 'bad';
+  const winSec = frameDurs.length ? (frameDurs.length * s.avgMs / 1000).toFixed(1) : '0';
+  const srcLine = mode === 'video' && video.videoWidth
+    ? `src  ${video.videoWidth}×${video.videoHeight} → ${W}×${H}`
+    : `src  demo → ${W}×${H}`;
+  perfEl.innerHTML =
+    `fps  <span class="${cls}">${s.fps.toFixed(1)}</span>${hz ? ` / ${hz}` : ''}\n` +
+    `t    ${s.avgMs.toFixed(1)} avg · ${s.p95Ms.toFixed(1)} p95 · ${s.maxMs.toFixed(1)} max ms\n` +
+    `draw ${drawMsS.toFixed(1)} ms js\n` +
+    `drop ${s.dropped} / ${winSec}s · ${dropTotal} total\n` +
+    srcLine;
+}
+
+function togglePerf() {
+  perfOn = !perfOn;
+  perfEl.classList.toggle('show', perfOn);
+  if (perfOn) renderPerf();
+  toast(perfOn ? 'fps diagnostics on' : 'fps diagnostics off');
+}
+
 // ---------- main loop ----------
 let last = 0;
 function frame(ms) {
-  const dt = Math.min(0.05, (ms - last) / 1000 || 0.016);
+  const rawDt = ms - last;       // unclamped — diagnostics see real pacing
+  const dt = Math.min(0.05, rawDt / 1000 || 0.016);
   last = ms;
   frameNo++;
   if (AC && analyser) detect(ms);
@@ -1552,8 +1664,10 @@ function frame(ms) {
     for (const ev of gridEvents(grid, prevFrameMs, ms)) fireBeat(ev.timeMs);
   }
   prevFrameMs = ms;
+  const t0 = performance.now();
   drawSource(ms / 1000);
   render(ms / 1000, dt, ms);
+  perfTick(rawDt, performance.now() - t0, ms);
   bpmEl.textContent = bpm === null ? '—' : Math.round(bpm);
   if (mode === 'video') {
     timeEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;

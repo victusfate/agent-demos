@@ -679,7 +679,7 @@ test('frameStats: steady 60 fps window → fps 60, base 60 Hz, zero drops', () =
   const s = frameStats(Array(120).fill(base));
   assert.ok(Math.abs(s.fps - 60) < 1e-9, `fps ${s.fps}`);
   assert.equal(s.baseMs, base);
-  assert.equal(s.avgMs, base);
+  assert.ok(Math.abs(s.avgMs - base) < 1e-9, `avg ${s.avgMs}`); // summation float dust
   assert.equal(s.p95Ms, base);
   assert.equal(s.maxMs, base);
   assert.equal(s.dropped, 0);
