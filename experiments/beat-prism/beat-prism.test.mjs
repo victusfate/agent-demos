@@ -934,6 +934,36 @@ test('structure: GLSL registered for each geometry program variant', () => {
   assert.ok(app.includes('uBlock'), 'pixelate quantization uniform in base variants');
 });
 
+// ---------- webgl slice 5 — color passes ----------
+
+test('buildPassPlan: chroma rides the bass — omitted quiet, sized loud', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const quiet = buildPassPlan(planInput({ active: new Set(['chroma']), bass: 0.01 }));
+  assert.equal(quiet.find(p => p.id === 'chroma'), undefined,
+    'sub-pixel split is not worth a pass');
+  const loud = buildPassPlan(planInput({ active: new Set(['chroma']), bass: 0.5 }));
+  assert.ok(Math.abs(loud.find(p => p.id === 'chroma').uniforms.amount - 15) < 1e-9);
+});
+
+test('buildPassPlan: channel-swap mix follows the pulse, capped at 1', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const half = buildPassPlan(planInput({
+    active: new Set(['channel-swap']), pulses: { 'channel-swap': 0.5 } }));
+  assert.ok(Math.abs(half.find(p => p.id === 'channel-swap').uniforms.mix - 0.6) < 1e-9);
+  const full = buildPassPlan(planInput({
+    active: new Set(['channel-swap']), pulses: { 'channel-swap': 1 } }));
+  assert.equal(full.find(p => p.id === 'channel-swap').uniforms.mix, 1);
+});
+
+test('structure: GLSL registered for every color program', () => {
+  const app = appScript();
+  for (const key of ['color', 'duotone', 'thermal', 'sepia-ghost',
+                     'channel-swap', 'neon-edge', 'chroma']) {
+    assert.match(app, new RegExp(`['"]?${key}['"]?:\\s*\`#version 300 es`),
+      `${key} shader`);
+  }
+});
+
 // ---------- webgl slice 3 — GL skeleton (structural) ----------
 
 test('structure: main canvas runs WebGL2, not 2d', () => {
