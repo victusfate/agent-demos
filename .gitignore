@@ -11,6 +11,3 @@ coverage/
 .env.local
 .claude/settings.local.json
 .claude/worktrees/
-
-# local test media (fetched by scripts/fetch-test-video.sh)
-videos/
