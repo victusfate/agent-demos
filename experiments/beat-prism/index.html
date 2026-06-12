@@ -468,6 +468,53 @@ function posterizeCurve(v, levels) {
 // Index of the frame `back` steps behind `head` in a ring of `size`.
 const ringIndex = (head, back, size) => (((head - back) % size) + size) % size;
 
+// ──────────────── webgl pass plan (docs/beat-prism-webgl) ────────────────
+
+// A "pass" is one fragment-shader draw over a full-screen quad. The plan
+// is the ordered list the GL frame executes: base (geometry) → color →
+// temporal → overlay. Light color and screen-space overlay effects fold
+// into one pass each (members listed); heavy color and temporal effects
+// keep individual programs. Scene sprites draw after the chain and are
+// not passes.
+const PASS_GATE = 0.02;   // a pulse decayed below this no longer earns a pass
+const COLOR_FOLD = ['hue-spin', 'sat-pump', 'bleach-burn', 'gamma-flicker',
+                    'color-drain', 'posterize', 'invert-strobe', 'flash'];
+const OVERLAY_FOLD = ['glow', 'scanlines', 'vhs-band', 'grain-burst',
+                      'vignette-pump', 'letterbox-snap', 'starburst', 'shockwave'];
+
+// Is this effect contributing pixels right now? Pulse effects must be
+// above the gate; continuous and scheduled effects ride activation.
+function passLive(effect, input) {
+  if (!input.active.has(effect.id)) return false;
+  if (effect.kind === 'pulse') return (input.pulses[effect.id] ?? 0) > PASS_GATE;
+  return true;
+}
+
+// Ordered pass list from frame state. Pure and deterministic — registry
+// order within each section. input: { active: Set<id>, pulses: {id→0..1},
+// bass, treble: 0..1, tSec, scheduled: { mirrorOn, tileN, lbOpen, frozen,
+// stutterBack } }. Returns [{ id, program, uniforms, members? }].
+function buildPassPlan(input) {
+  const live = id => {
+    const e = FX_REGISTRY.find(f => f.id === id);
+    return e ? passLive(e, input) : false;
+  };
+  const fold = (id, memberIds) => {
+    const members = memberIds.filter(live);
+    return members.length ? [{ id, program: id, uniforms: {}, members }] : [];
+  };
+  const solo = ids => ids.filter(live).map(id => ({ id, program: id, uniforms: {} }));
+  const byCat = cat => FX_REGISTRY.filter(e => e.cat === cat).map(e => e.id);
+  const colorHeavy = byCat('color').filter(id => !COLOR_FOLD.includes(id));
+  return [
+    { id: 'base', program: 'base', uniforms: {} },
+    ...fold('color', COLOR_FOLD),
+    ...solo(colorHeavy),
+    ...solo(byCat('temporal')),
+    ...fold('overlay', OVERLAY_FOLD),
+  ];
+}
+
 // ──────────────── fps diagnostics ────────────────
 
 // Standard display refresh periods. The best sustained frame interval
@@ -528,7 +575,7 @@ globalThis.__logic = {
   spectralFlux, bandEnergy, adaptiveThreshold, stepOnset, estimateBpm, decayPulse,
   FX_REGISTRY, mulberry32, latencyMs, stepGrid, gridEvents, dealHand,
   sliceOffsets, wedgeAngles, posterizeCurve, ringIndex, formatTime, seekTarget,
-  snapRefreshMs, missedVsync, frameStats,
+  snapRefreshMs, missedVsync, frameStats, buildPassPlan,
 };
 })();
 </script>
