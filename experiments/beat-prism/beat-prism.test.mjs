@@ -635,3 +635,81 @@ test('structure: arrow keys seek through the pure helpers', () => {
   assert.ok(app.includes('seekTarget('), 'app uses seekTarget');
   assert.ok(app.includes('formatTime('), 'app uses formatTime');
 });
+
+// ---------- fps diagnostics — frame pacing stats ----------
+
+test('snapRefreshMs: snaps an observed interval to the nearest standard refresh period', () => {
+  const { snapRefreshMs } = loadLogic(HTML);
+  assert.equal(snapRefreshMs(16.9), 1000 / 60);   // jittery 60 Hz
+  assert.equal(snapRefreshMs(8.2), 1000 / 120);   // 120 Hz display
+  assert.equal(snapRefreshMs(34), 1000 / 30);     // sustained half-rate
+});
+
+test('snapRefreshMs: degenerate input → null', () => {
+  const { snapRefreshMs } = loadLogic(HTML);
+  assert.equal(snapRefreshMs(0), null);
+  assert.equal(snapRefreshMs(-5), null);
+  assert.equal(snapRefreshMs(NaN), null);
+});
+
+test('missedVsync: on-pace and jittery frames miss nothing', () => {
+  const { missedVsync } = loadLogic(HTML);
+  const base = 1000 / 60;
+  assert.equal(missedVsync(base, base), 0);
+  assert.equal(missedVsync(base * 1.4, base), 0); // rounding gives ~half-period tolerance
+  assert.equal(missedVsync(base, 0), 0);          // no base estimate yet → never counts
+});
+
+test('missedVsync: doubled / tripled frame time = 1 / 2 missed vsyncs', () => {
+  const { missedVsync } = loadLogic(HTML);
+  const base = 1000 / 60;
+  assert.equal(missedVsync(base * 2, base), 1);
+  assert.equal(missedVsync(base * 3.1, base), 2);
+});
+
+test('frameStats: empty window → zeroed stats, no base estimate', () => {
+  const { frameStats } = loadLogic(HTML);
+  assert.deepEqual(frameStats([]),
+    { fps: 0, avgMs: 0, p95Ms: 0, maxMs: 0, baseMs: null, dropped: 0 });
+});
+
+test('frameStats: steady 60 fps window → fps 60, base 60 Hz, zero drops', () => {
+  const { frameStats } = loadLogic(HTML);
+  const base = 1000 / 60;
+  const s = frameStats(Array(120).fill(base));
+  assert.ok(Math.abs(s.fps - 60) < 1e-9, `fps ${s.fps}`);
+  assert.equal(s.baseMs, base);
+  assert.equal(s.avgMs, base);
+  assert.equal(s.p95Ms, base);
+  assert.equal(s.maxMs, base);
+  assert.equal(s.dropped, 0);
+});
+
+test('frameStats: spikes register as missed vsyncs and lift p95/max', () => {
+  const { frameStats } = loadLogic(HTML);
+  const base = 1000 / 60;
+  // 58 clean frames + a doubled and a tripled one → 1 + 2 missed
+  const s = frameStats(Array(58).fill(base).concat([base * 2, base * 3]));
+  assert.equal(s.dropped, 3);
+  assert.equal(s.maxMs, base * 3);
+  assert.equal(s.baseMs, base);     // p10 ignores the spikes
+  assert.ok(s.fps < 60);
+});
+
+test('frameStats: sustained half-rate reads as a 30 Hz base, not as drops', () => {
+  const { frameStats } = loadLogic(HTML);
+  // every frame 33.3 ms: honest readout is "running at 30", dropped stays 0
+  const s = frameStats(Array(90).fill(1000 / 30));
+  assert.equal(s.baseMs, 1000 / 30);
+  assert.equal(s.dropped, 0);
+  assert.ok(Math.abs(s.fps - 30) < 1e-9);
+});
+
+test('structure: perf panel exists and the app loop feeds it', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="perf"/, 'perf panel element');
+  const app = appScript();
+  assert.ok(app.includes('frameStats('), 'app uses frameStats');
+  assert.ok(app.includes('missedVsync('), 'app uses missedVsync');
+  assert.ok(app.includes("'f'"), 'f key toggles the panel');
+});
