@@ -705,6 +705,83 @@ test('frameStats: sustained half-rate reads as a 30 Hz base, not as drops', () =
   assert.ok(Math.abs(s.fps - 30) < 1e-9);
 });
 
+// ---------- webgl slice 1 — pass plan: order, gating, minimal plan ----------
+
+const planInput = (over = {}) => ({
+  active: new Set(), pulses: {}, bass: 0, treble: 0, tSec: 0,
+  scheduled: { mirrorOn: false, tileN: 2, lbOpen: true, frozen: false, stutterBack: 0 },
+  ...over,
+});
+
+test('buildPassPlan: empty active set → single base pass', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput());
+  assert.equal(plan.length, 1);
+  assert.equal(plan[0].id, 'base');
+  assert.equal(plan[0].program, 'base');
+});
+
+test('buildPassPlan: category order base → color → temporal → overlay', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput({
+    active: new Set(['hue-spin', 'duotone', 'echo-trails', 'glow']),
+    pulses: { 'hue-spin': 1 },
+  }));
+  const ids = plan.map(p => p.id);
+  const at = id => ids.indexOf(id);
+  assert.equal(at('base'), 0);
+  assert.ok(at('color') > at('base'), 'color fold after base');
+  assert.ok(at('duotone') > at('color'), 'heavy color after the fold');
+  assert.ok(at('echo-trails') > at('duotone'), 'temporal after color');
+  assert.ok(at('overlay') > at('echo-trails'), 'overlay last');
+});
+
+test('buildPassPlan: pulse members below the gate are dropped from folds', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput({
+    active: new Set(['hue-spin', 'flash']),
+    pulses: { 'hue-spin': 0.001, flash: 0.5 },
+  }));
+  const color = plan.find(p => p.id === 'color');
+  assert.ok(color, 'fold pass present while one member is live');
+  assert.deepEqual(color.members, ['flash']);
+});
+
+test('buildPassPlan: fold pass disappears when every member decays', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput({
+    active: new Set(['flash', 'starburst']),
+    pulses: { flash: 0.0, starburst: 0.001 },
+  }));
+  assert.equal(plan.find(p => p.id === 'color'), undefined);
+  assert.equal(plan.find(p => p.id === 'overlay'), undefined);
+});
+
+test('buildPassPlan: gated individual pulse passes appear only above the gate', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const lo = buildPassPlan(planInput({
+    active: new Set(['channel-swap']), pulses: { 'channel-swap': 0.01 } }));
+  const hi = buildPassPlan(planInput({
+    active: new Set(['channel-swap']), pulses: { 'channel-swap': 0.5 } }));
+  assert.equal(lo.find(p => p.id === 'channel-swap'), undefined);
+  assert.ok(hi.find(p => p.id === 'channel-swap'));
+});
+
+test('buildPassPlan: continuous effects ride activation alone, no pulse needed', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput({ active: new Set(['thermal', 'kaleidoscope']) }));
+  assert.ok(plan.find(p => p.id === 'thermal'));
+});
+
+test('buildPassPlan: deterministic — identical input, deep-equal plan', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const input = planInput({
+    active: new Set(['hue-spin', 'echo-trails', 'shockwave', 'neon-edge']),
+    pulses: { 'hue-spin': 0.7, shockwave: 0.4 }, bass: 0.5, treble: 0.2, tSec: 12.5,
+  });
+  assert.deepEqual(buildPassPlan(input), buildPassPlan(input));
+});
+
 test('structure: perf panel exists and the app loop feeds it', () => {
   const html = readFileSync(HTML, 'utf8');
   assert.match(html, /id="perf"/, 'perf panel element');
