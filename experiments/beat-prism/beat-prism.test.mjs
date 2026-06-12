@@ -873,6 +873,67 @@ test('buildPassPlan: fold passes now carry synthesized uniforms; base carries th
   assert.ok(Math.abs(plan[0].uniforms.matrix[0] - 1.07) < 1e-9);
 });
 
+// ---------- webgl slice 4 — non-affine geometry programs ----------
+
+test('buildPassPlan: geometry replacements select the base program variant', () => {
+  const { buildPassPlan, sliceOffsets } = loadLogic(HTML);
+  const kal = buildPassPlan(planInput({ active: new Set(['kaleidoscope']) }));
+  assert.equal(kal[0].program, 'kaleido');
+
+  const tile = buildPassPlan(planInput({
+    active: new Set(['tile-grid']),
+    scheduled: { mirrorOn: false, tileN: 3, lbOpen: true, frozen: false, stutterBack: 0 },
+  }));
+  assert.equal(tile[0].program, 'tile');
+  assert.equal(tile[0].uniforms.tiles, 3);
+
+  const sg = buildPassPlan(planInput({
+    active: new Set(['slice-glitch']), pulses: { 'slice-glitch': 0.5 }, sliceSeed: 42,
+  }));
+  assert.equal(sg[0].program, 'slice');
+  assert.deepEqual(sg[0].uniforms.offsets, sliceOffsets(42, 14, 35));
+
+  const vs = buildPassPlan(planInput({
+    active: new Set(['v-slice']), pulses: { 'v-slice': 1 }, sliceSeed: 42,
+  }));
+  assert.equal(vs[0].program, 'vslice');
+  assert.deepEqual(vs[0].uniforms.offsets, sliceOffsets(43, 14, 70));
+});
+
+test('buildPassPlan: replacement priority matches the 2D chain (kaleido wins)', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const plan = buildPassPlan(planInput({
+    active: new Set(['kaleidoscope', 'tile-grid', 'slice-glitch']),
+    pulses: { 'slice-glitch': 1 },
+  }));
+  assert.equal(plan[0].program, 'kaleido');
+});
+
+test('buildPassPlan: pixelate rides any variant as a block-size uniform', () => {
+  const { buildPassPlan } = loadLogic(HTML);
+  const alone = buildPassPlan(planInput({
+    active: new Set(['pixelate']), pulses: { pixelate: 1 } }));
+  assert.equal(alone[0].program, 'base');
+  assert.ok(Math.abs(alone[0].uniforms.block - 29) < 1e-9);   // 3 + P·26
+
+  const ridden = buildPassPlan(planInput({
+    active: new Set(['pixelate', 'kaleidoscope']), pulses: { pixelate: 1 } }));
+  assert.equal(ridden[0].program, 'kaleido');
+  assert.ok(Math.abs(ridden[0].uniforms.block - 29) < 1e-9);
+
+  const decayed = buildPassPlan(planInput({
+    active: new Set(['pixelate']), pulses: { pixelate: 0.001 } }));
+  assert.equal(decayed[0].uniforms.block, 0);
+});
+
+test('structure: GLSL registered for each geometry program variant', () => {
+  const app = appScript();
+  for (const key of ['kaleido', 'tile', 'slice', 'vslice']) {
+    assert.match(app, new RegExp(`${key}:\\s*\`#version 300 es`), `${key} shader`);
+  }
+  assert.ok(app.includes('uBlock'), 'pixelate quantization uniform in base variants');
+});
+
 // ---------- webgl slice 3 — GL skeleton (structural) ----------
 
 test('structure: main canvas runs WebGL2, not 2d', () => {
