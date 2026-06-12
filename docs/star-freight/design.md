@@ -9,15 +9,19 @@
 | reply | The guest's answer blob, sent back to the host out-of-band (paste or QR). Completes that seat's connection. |
 | seat | A player slot (1–4). Host always holds seat 1. A seat is held by a human, a bot, or is dormant. |
 | host | The room creator. Runs the authoritative rules engine; relays all state. Host disconnect ends the game. |
-| intent | A guest's proposed action ("roll", "buy 3 ore", "fight", "flee"). Only the host turns intents into state changes. |
+| intent | A guest's proposed action. Closed set: `roll`, `path` (chosen hex route), `buy`, `sell`, `shop` (upgrade/equipment/crew purchase), `fight`, `flee`, `endTurn`. Only the host turns intents into state changes. |
+| round | One full pass of all active seats in order, followed by the pirate phase and the win check. |
 | Space Bucks | The currency. Earned by trading cargo, bounties, and events. |
+| cargo | Tradeable goods (a handful of types, e.g. ore, medkits, spice). A ship holds cargo in lots — one lot = one unit of one good. Bought and sold at Starbases at drifting prices. |
+| asset | Anything a ship can lose on defeat: an upgrade, equipment, or crew card, or a cargo lot. |
 | Starbase | A station hex: market (buy/sell cargo), shipyard (buy upgrades/equipment/crew), respawn point after defeat. |
 | sector | One hex on the board. Kinds: starbase, planet, asteroid, nebula, deep space, core. |
+| movement points | The result of the turn's movement roll. Normal sector entry costs 1 point; ring-barrier sector entry costs 2. |
 | ring barrier | A concentric band of nebula/barrier sectors. Difficult terrain: entering costs extra movement ("slows warping"). Rings separate rim → mid → core. |
 | scenario | A card drawn at room setup that sets this game's win condition (e.g., "amass 5,000 Space Bucks", "defeat 4 pirates", "score 2 ship kills"). One scenario per game, visible to all. |
 | mods | A ship's accumulated bonuses from upgrades, equipment, and crew cards. Added to combat and sometimes movement rolls. |
 | pirate | An NPC ship. Spawned by event cards; hunts players each round (host-moved 1–2 sectors toward the nearest player ship); fights with the same opposed-roll combat. |
-| event | A card drawn when a ship ends movement on an event-bearing sector. Effects: pirate spawns, market shocks, windfalls, hazards. |
+| event | A card drawn when a ship ends movement on a non-Starbase sector (planet, asteroid, nebula, deep space, core; draw chance rises toward the core). Effects: pirate spawns, market shocks, windfalls, hazards. |
 
 ## Decisions
 
