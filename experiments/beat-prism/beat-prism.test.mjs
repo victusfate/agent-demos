@@ -890,6 +890,11 @@ test('structure: needs-WebGL2 fallback and context-loss recovery exist', () => {
   assert.ok(app.includes('webglcontextrestored'), 'context-restored handler bound');
 });
 
+test('structure: app script is syntactically valid JS', () => {
+  // execution needs a DOM; parsing does not — catches edit damage early
+  assert.doesNotThrow(() => new Function(appScript()));
+});
+
 test('structure: the frame loop renders through the pass plan', () => {
   const app = appScript();
   assert.ok(app.includes('buildPassPlan('), 'frame loop builds the plan');

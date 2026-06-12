@@ -13,3 +13,15 @@
   (column-major mat3, 2D ctx-transform op order, parity amplitudes),
   `mat3mul`. Plan input grew `hueBase`, `joltDir`, `shake`, and
   `scheduled.lbPos` — design.md contract updated alongside. 93 green.
+
+## Slice 3 — GL skeleton renders the show
+- Status: done
+- Notes: main canvas is WebGL2 (one shared quad VS with uMatrix; SHADERS
+  registry keyed by program; glRender executes the plan subset that has
+  programs, so families come alive per slice). Source upload is the 2D
+  `src` canvas — video never enters GL at 4K, passes run at canvas res.
+  #nogl fallback, context-lost/restored rebuild, ping-pong realloc on
+  resize (old targets deleted). Scene sims extracted to `ageScene`; pulse
+  decay moved into the frame loop. 2D draw functions are dead code until
+  slice 9; `s` save-PNG temporarily unreliable (GL buffer not preserved)
+  — fixed in slice 9. Added an app-script parse test. 97 green.
