@@ -873,6 +873,30 @@ test('buildPassPlan: fold passes now carry synthesized uniforms; base carries th
   assert.ok(Math.abs(plan[0].uniforms.matrix[0] - 1.07) < 1e-9);
 });
 
+// ---------- webgl slice 3 — GL skeleton (structural) ----------
+
+test('structure: main canvas runs WebGL2, not 2d', () => {
+  const app = appScript();
+  assert.ok(app.includes("getContext('webgl2'"), 'webgl2 context requested');
+  assert.ok(!app.includes("canvas.getContext('2d')"),
+    'main canvas must no longer request a 2d context (one context type per canvas)');
+});
+
+test('structure: needs-WebGL2 fallback and context-loss recovery exist', () => {
+  const html = readFileSync(HTML, 'utf8');
+  assert.match(html, /id="nogl"/, 'fallback message element');
+  const app = appScript();
+  assert.ok(app.includes('webglcontextlost'), 'context-lost handler bound');
+  assert.ok(app.includes('webglcontextrestored'), 'context-restored handler bound');
+});
+
+test('structure: the frame loop renders through the pass plan', () => {
+  const app = appScript();
+  assert.ok(app.includes('buildPassPlan('), 'frame loop builds the plan');
+  assert.ok(app.includes('function glRender'), 'pass executor exists');
+  assert.ok(app.includes('texImage2D'), 'source frame uploaded as a texture');
+});
+
 test('structure: perf panel exists and the app loop feeds it', () => {
   const html = readFileSync(HTML, 'utf8');
   assert.match(html, /id="perf"/, 'perf panel element');
