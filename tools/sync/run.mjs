@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 import { parsePolicy } from './policy.mjs';
 import { promoteFiles } from './promote.mjs';
-import { hoist } from '../hoist-skill/hoist.mjs';
-import { readManifest } from '../hoist-skill/manifest.mjs';
+import { hoist } from '../hoist-skill/hoist.ts';
+import { readManifest } from '../hoist-skill/manifest.ts';
 
 const SCAFFOLD_ROOT = process.env.SYNC_SCAFFOLD_ROOT
   ?? join(dirname(fileURLToPath(import.meta.url)), '../..');

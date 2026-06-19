@@ -299,14 +299,14 @@ const POLICY_BASE = {
 
 // ---------------------------------------------------------------- slice 4: hoist-skill API export
 
-// Case 16a: hoist() is importable from the .mjs engine module (works on Node 18+,
-// unlike an extensionless ESM import)
+// Case 16a: hoist() is importable from the TypeScript engine module (Node strips
+// types natively), via an explicit .ts specifier rather than extensionless ESM
 let hoist;
 {
   try {
-    ({ hoist } = await import('../hoist-skill/hoist.mjs'));
+    ({ hoist } = await import('../hoist-skill/hoist.ts'));
   } catch { /* fall through */ }
-  assert('case 16a: hoist.mjs exports hoist()', typeof hoist === 'function');
+  assert('case 16a: hoist.ts exports hoist()', typeof hoist === 'function');
 }
 
 // Case 17: hoist() is importable and list mode returns capabilities JSON

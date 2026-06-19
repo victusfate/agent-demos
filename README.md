@@ -36,7 +36,7 @@ grill-with-docs → to-prd → tdd → review
 4. **Review** — Chain stops and presents a summary of what was built, tests passing, and any plan deviations. Prompts you to review before merging.
 
 <!-- BEGIN_SKILLS_INVOCATION -->
-Skills can also be invoked individually: `/feature-chain`, `/grill-with-docs`, `/to-prd`, `/tdd`, `/design-review`, `/code-quality-review`, `/skillify`, `/sync-scaffold`, `/create-pr`, `/code-review`, `/simplify`, `/prune`, `/pause`, `/resume`, `/hoist-skill`, `/protect-branch`, `/frontend-design`, `/audit`.
+Skills can also be invoked individually: `/feature-chain`, `/grill-with-docs`, `/to-prd`, `/tdd`, `/design-review`, `/code-quality-review`, `/skillify`, `/sync-scaffold`, `/create-pr`, `/code-review`, `/simplify`, `/prune`, `/pause`, `/resume`, `/hoist-skill`, `/protect-branch`, `/frontend-design`, `/audit`, `/add-linter`, `/ponytail`.
 <!-- END_SKILLS_INVOCATION -->
 
 ## Harness support
