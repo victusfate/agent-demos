@@ -289,9 +289,10 @@ Or just run `/protect-branch` in Claude Code — it opens this page and walks yo
 No manual steps needed day-to-day:
 
 1. Developer opens PR with [conventional commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, etc.)
-2. `verify` job runs `npm test` (all tool/script suites + linter + README freshness) — must pass before merge is allowed
-3. PR merges to `main`
-4. `version-bump` workflow computes the bump from the merged commits (`scripts/compute-bump.mjs`), commits the new `package.json` version to `main`, and pushes the `v<version>` tag
+2. `verify` job runs `npm test` (all tool/script suites + linter + `docs/skills.md` freshness) — must pass before merge is allowed
+3. The `create-pr` skill derives the bump from the branch's commits (`scripts/compute-bump.ts`) and writes the new `package.json` version onto the PR branch before merge
+4. PR merges to `main`
+5. `release.yml` reads the merged `package.json` version and pushes the matching `v<version>` tag — it only ever pushes a tag, never a commit to `main`
 
 ### Commit → version mapping
 
